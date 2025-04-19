@@ -10,7 +10,12 @@ import os
 from decoder import Decoder
 from encoder import Encoder
 from discriminator import Discriminator
+from torch import amp
 import math
+
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
+
+scaler = amp.GradScaler()
 
 # Parámetros
 WARM_UP_LEN = 50  # numero de epochs que dejo al discriminador sin entrenar
@@ -25,7 +30,7 @@ def freeze_disc(global_step: int, epoch: int) -> int:
 image_channels = 3
 image_size = 32
 message_size = 128  # Aumentar a 512
-batch_size = 64
+batch_size = 2
 num_epochs = 5000
 RUN_NAME = "StenGan8"
 log_dir = f'./runs/{RUN_NAME}'
@@ -38,10 +43,10 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 writer = SummaryWriter(log_dir)
 
 
-# Dataset Open Images (resolución (384, 384))
+# Dataset Open Images (resolución (256, 256))
 transform = transforms.Compose([
-    transforms.Resize((384, 384)),
-    transforms.CenterCrop((384, 384)),
+    transforms.Resize((256, 256)),
+    transforms.CenterCrop((256, 256)),
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
@@ -55,14 +60,14 @@ test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
 
 # Inicialización
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-encoder = Encoder(image_channels, message_size).to(device)
-decoder = Decoder(image_channels, image_size, message_size).to(device)
-discriminator = Discriminator(image_channels).to(device)
+encoder = Encoder(image_channels=image_channels, message_size=message_size, image_size=image_size).to(device)
+decoder = Decoder(image_channels=image_channels, message_size=message_size).to(device)
+discriminator = Discriminator(image_channels=image_channels).to(device)
 
 enc_dec_opt = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-4)
 disc_opt = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
 
-bce = nn.BCELoss()
+bce = nn.BCEWithLogitsLoss()
 
 # TEST
 def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, device, epoch):
@@ -95,7 +100,7 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
             bit_accuracy = (pred_bits == true_bits).float().mean()
 
             total_message_loss += message_loss.item()
-            total_image_loss += image_loss.item()
+            total_image_loss += image_loss.detach().item()
             total_bit_accuracy += bit_accuracy.item()
             num_batches += 1
 
@@ -133,55 +138,61 @@ for epoch in range(num_epochs):
         messages = torch.randint(0, 2, (images.size(0), message_size)).float().to(device)
 
         # Paso forward
-        stego_images = encoder(images, messages)
-        recovered_messages = decoder(stego_images)
+        torch.cuda.empty_cache()
+        with amp.autocast("cuda"):
+            stego_images = encoder(images, messages)
+            recovered_messages = decoder(stego_images)
 
-        # Bit Accuracy
-        with torch.no_grad():
-            pred_bits = (recovered_messages > 0.5).int()
-            true_bits = messages.int()
-            bit_accuracy = (pred_bits == true_bits).float().mean()
+            # Bit Accuracy
+            with torch.no_grad():
+                pred_bits = (torch.sigmoid(recovered_messages) > 0.5).int()
+                true_bits = messages.int()
+                bit_accuracy = (pred_bits == true_bits).float().mean()
 
-        # Discriminador
-        real_labels = torch.full((images.size(0), 1), 0.9, device=device)
-        fake_labels = torch.full((images.size(0), 1), 0.1, device=device)
+            # Discriminador
+            real_labels = torch.full((images.size(0), 1), 0.9, device=device)
+            fake_labels = torch.full((images.size(0), 1), 0.1, device=device)
 
-        disc_real = discriminator(images)
-        disc_fake = discriminator(stego_images.detach())
+            disc_real = discriminator(images)
+            disc_fake = discriminator(stego_images.detach())
 
-        disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
-                    F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
+            disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
+                        F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
 
-        if disc_loss.item() < 0.1:
-            train_discriminator = False
-        else:
-            train_discriminator = True
+            if disc_loss.item() < 0.1:
+                train_discriminator = False
+            else:
+                train_discriminator = True
 
-        # El discriminador NO se entrena todos los epochs
-        if train_discriminator:
-            if epoch > WARM_UP_LEN and freeze_disc(global_step, epoch):
-                disc_opt.zero_grad()
-                disc_loss.backward()
-                disc_opt.step()
+            # El discriminador NO se entrena todos los epochs
+            if train_discriminator:
+                if epoch > WARM_UP_LEN and freeze_disc(global_step, epoch):
+                    disc_opt.zero_grad()
+                    with amp.autocast("cuda"):
+                        disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
+                                    F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
+                    scaler.scale(disc_loss).backward()
+                    scaler.step(disc_opt)
+                    scaler.update()
 
-        # Encoder + Decoder
-        disc_pred = discriminator(stego_images)
-        image_loss = (1 - ssim(stego_images, images, data_range=1.0, size_average=True)) + \
-                     image_loss_lambda * F.mse_loss(stego_images, images)
+            # Encoder + Decoder
+            disc_pred = discriminator(stego_images)
+            image_loss = (1 - ssim(stego_images, images, data_range=1.0, size_average=True)) + \
+                         image_loss_lambda * F.mse_loss(stego_images, images)
 
-        message_loss = bce(recovered_messages, messages)
-        adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
+            message_loss = bce(recovered_messages, messages)
+            adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
 
-        # WarmUP
-        if epoch < WARM_UP_LEN:
-            total_loss = image_loss + message_loss
-        else:
-            total_loss = image_loss + message_loss + adv_loss
-
+            # WarmUP
+            if epoch < WARM_UP_LEN:
+                total_loss = image_loss + message_loss
+            else:
+                total_loss = image_loss + message_loss + adv_loss
 
         enc_dec_opt.zero_grad()
-        total_loss.backward()
-        enc_dec_opt.step()
+        scaler.scale(total_loss).backward()
+        scaler.step(enc_dec_opt)
+        scaler.update()
 
         total_image_loss += image_loss.item()
         total_message_loss += message_loss.item()

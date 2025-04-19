@@ -27,7 +27,6 @@ def download_and_prepare():
         DATASET_NAME,
         split="train",
         max_samples=NUM_TRAIN,
-        dataset_dir=str(SAVE_DIR / "raw_train"),
         shuffle=True,
         label_types=[],
     )
@@ -37,7 +36,6 @@ def download_and_prepare():
         DATASET_NAME,
         split="validation",
         max_samples=NUM_VAL,
-        dataset_dir=str(SAVE_DIR / "raw_val"),
         shuffle=True,
         label_types=[],
     )
