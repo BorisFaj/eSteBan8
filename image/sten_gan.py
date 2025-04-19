@@ -5,33 +5,44 @@ from torch.utils.data import DataLoader
 from pytorch_msssim import ssim
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
+import torch.nn.functional as F
 import os
 
 # Parámetros
+WARM_UP_LEN = 50
+DISC_FREEZE_WINDOW = 15
 image_channels = 3
 image_size = 32
-message_size = 512
+message_size = 128  # Aumentar a 512
 batch_size = 64
 num_epochs = 5000
-log_dir = './runs/steganography_gan5'
-checkpoint_dir = './checkpoints'
+RUN_NAME = "steganography_gan7"
+log_dir = f'./runs/{RUN_NAME}'
+checkpoint_dir = f'./checkpoints/{RUN_NAME}'
+image_loss_lambda = 0.1
+
 os.makedirs(log_dir, exist_ok=True)
 os.makedirs(checkpoint_dir, exist_ok=True)
 
 # TensorBoard writer
 writer = SummaryWriter(log_dir)
 
+# Unnormalizer para visualización
+unnormalize = lambda x: x * 0.5 + 0.5
+
 # Encoder: imagen + mensaje -> stego_image
 class Encoder(nn.Module):
     def __init__(self):
         super().__init__()
         self.net = nn.Sequential(
-            nn.Conv2d(image_channels + message_size, 32, kernel_size=3, padding=1),
+            nn.Conv2d(image_channels + message_size, 64, 3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, 32, kernel_size=3, padding=1),
+            nn.Conv2d(64, 64, 3, padding=1),
             nn.ReLU(),
-            nn.Conv2d(32, image_channels, kernel_size=1),
-            nn.Sigmoid()
+            nn.Conv2d(64, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, image_channels, 1),
+            nn.Tanh()
         )
 
     def forward(self, image, message):
@@ -74,9 +85,10 @@ class Discriminator(nn.Module):
     def forward(self, image):
         return self.net(image)
 
-# Dataset CIFAR-10
+# Dataset CIFAR-10 (escalado a [-1, 1])
 transform = transforms.Compose([
-    transforms.ToTensor()
+    transforms.ToTensor(),
+    transforms.Normalize((0.5,), (0.5,))
 ])
 train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
@@ -110,26 +122,41 @@ for epoch in range(num_epochs):
         recovered_messages = decoder(stego_images)
 
         # Discriminador
-        real_labels = torch.ones(images.size(0), 1).to(device)
-        fake_labels = torch.zeros(images.size(0), 1).to(device)
+        real_labels = torch.full((images.size(0), 1), 0.9, device=device)
+        fake_labels = torch.full((images.size(0), 1), 0.1, device=device)
 
         disc_real = discriminator(images)
         disc_fake = discriminator(stego_images.detach())
 
-        disc_loss = bce(disc_real, real_labels) + bce(disc_fake, fake_labels)
+        disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
+                    F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
 
-        disc_opt.zero_grad()
-        disc_loss.backward()
-        disc_opt.step()
+        if disc_loss.item() < 0.1:
+            train_discriminator = False
+        else:
+            train_discriminator = True
+
+        # El discriminador NO se entrena todos los epochs
+        if train_discriminator:
+            if epoch > WARM_UP_LEN and global_step % DISC_FREEZE_WINDOW == 0:
+                disc_opt.zero_grad()
+                disc_loss.backward()
+                disc_opt.step()
 
         # Encoder + Decoder
         disc_pred = discriminator(stego_images)
+        image_loss = (1 - ssim(stego_images, images, data_range=1.0, size_average=True)) + \
+                     image_loss_lambda * F.mse_loss(stego_images, images)
 
-        image_loss = 1 - ssim(stego_images, images, data_range=1.0, size_average=True)
         message_loss = bce(recovered_messages, messages)
-        adv_loss = bce(disc_pred, real_labels)
+        adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
 
-        total_loss = image_loss + message_loss + adv_loss
+        # WarmUP
+        if epoch < WARM_UP_LEN:
+            total_loss = image_loss + message_loss
+        else:
+            total_loss = image_loss + message_loss + adv_loss
+
 
         enc_dec_opt.zero_grad()
         total_loss.backward()
@@ -177,8 +204,6 @@ for epoch in range(num_epochs):
     img_grid_stego = make_grid(stego_images[:8].detach().cpu(), nrow=4, normalize=True)
     writer.add_image("Images/Real", img_grid_real, epoch)
     writer.add_image("Images/Stego", img_grid_stego, epoch)
-
-
 
 
     # Guardar modelos cada 400 epochs
