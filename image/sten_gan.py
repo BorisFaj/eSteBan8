@@ -7,19 +7,29 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 import torch.nn.functional as F
 import os
+from decoder import Decoder
+from encoder import Encoder
+from discriminator import Discriminator
+import math
 
 # Parámetros
-WARM_UP_LEN = 50
-DISC_FREEZE_WINDOW = 15
+WARM_UP_LEN = 50  # numero de epochs que dejo al discriminador sin entrenar
+image_loss_lambda = 0.1  # Parametro para darle algo de tolerancia al image loss
+DISC_FREEZE_WINDOW = 15  # ventana de epochs que se queda sin entrenar el discriminador despues del warmup
+k = 0.005
+
+def freeze_disc(global_step: int, epoch: int) -> int:
+    freeze_window = max(1, int(DISC_FREEZE_WINDOW * math.exp(-k * epoch)))
+    return global_step % freeze_window == 0
+
 image_channels = 3
 image_size = 32
 message_size = 128  # Aumentar a 512
 batch_size = 64
 num_epochs = 5000
-RUN_NAME = "steganography_gan7"
+RUN_NAME = "StenGan8"
 log_dir = f'./runs/{RUN_NAME}'
 checkpoint_dir = f'./checkpoints/{RUN_NAME}'
-image_loss_lambda = 0.1
 
 os.makedirs(log_dir, exist_ok=True)
 os.makedirs(checkpoint_dir, exist_ok=True)
@@ -27,82 +37,86 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 # TensorBoard writer
 writer = SummaryWriter(log_dir)
 
-# Unnormalizer para visualización
-unnormalize = lambda x: x * 0.5 + 0.5
 
-# Encoder: imagen + mensaje -> stego_image
-class Encoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(image_channels + message_size, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 64, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(64, 32, 3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, image_channels, 1),
-            nn.Tanh()
-        )
-
-    def forward(self, image, message):
-        msg_map = message.view(-1, message_size, 1, 1).expand(-1, message_size, image_size, image_size)
-
-        x = torch.cat([image, msg_map], dim=1)
-        return self.net(x)
-
-# Decoder: stego_image -> mensaje
-class Decoder(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(image_channels, 32, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Conv2d(32, 64, kernel_size=3, padding=1),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(64 * image_size * image_size, message_size),
-            nn.Sigmoid()
-        )
-
-    def forward(self, stego_image):
-        return self.net(stego_image)
-
-# Discriminador: intenta distinguir entre imágenes reales y stego
-class Discriminator(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.net = nn.Sequential(
-            nn.Conv2d(image_channels, 32, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Conv2d(32, 64, kernel_size=3, stride=2, padding=1),
-            nn.LeakyReLU(0.2),
-            nn.Flatten(),
-            nn.Linear(64 * 8 * 8, 1),
-            nn.Sigmoid()
-        )
-
-    def forward(self, image):
-        return self.net(image)
-
-# Dataset CIFAR-10 (escalado a [-1, 1])
+# Dataset Open Images (resolución (384, 384))
 transform = transforms.Compose([
+    transforms.Resize((384, 384)),
+    transforms.CenterCrop((384, 384)),
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
-train_dataset = datasets.CIFAR10(root='./data', train=True, download=True, transform=transform)
+
+train_dataset = datasets.ImageFolder(root="openimages_custom/train", transform=transform)
 train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+
+test_dataset = datasets.ImageFolder(root="openimages_custom/val", transform=transform)
+test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
 
 # Inicialización
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-encoder = Encoder().to(device)
-decoder = Decoder().to(device)
-discriminator = Discriminator().to(device)
+encoder = Encoder(image_channels, message_size).to(device)
+decoder = Decoder(image_channels, image_size, message_size).to(device)
+discriminator = Discriminator(image_channels).to(device)
 
 enc_dec_opt = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-4)
 disc_opt = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
 
 bce = nn.BCELoss()
+
+# TEST
+def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, device, epoch):
+    encoder.eval()
+    decoder.eval()
+    discriminator.eval()
+
+    total_message_loss = 0
+    total_image_loss = 0
+    total_bit_accuracy = 0
+    num_batches = 0
+
+    bce = nn.BCELoss()
+
+    with torch.no_grad():
+        for i, (images, _) in enumerate(test_loader):
+            images = images.to(device)
+            messages = torch.randint(0, 2, (images.size(0), message_size)).float().to(device)
+
+            stego_images = encoder(images, messages)
+            recovered_messages = decoder(stego_images)
+
+            # Métricas
+            message_loss = bce(recovered_messages, messages)
+            image_loss = (1 - ssim(stego_images, images, data_range=1.0, size_average=True)) + \
+                         image_loss_lambda * F.mse_loss(stego_images, images)
+
+            pred_bits = (recovered_messages > 0.5).int()
+            true_bits = messages.int()
+            bit_accuracy = (pred_bits == true_bits).float().mean()
+
+            total_message_loss += message_loss.item()
+            total_image_loss += image_loss.item()
+            total_bit_accuracy += bit_accuracy.item()
+            num_batches += 1
+
+        avg_message_loss = total_message_loss / num_batches
+        avg_image_loss = total_image_loss / num_batches
+        avg_bit_accuracy = total_bit_accuracy / num_batches
+
+        writer.add_scalar("Test/Loss/Message", avg_message_loss, epoch)
+        writer.add_scalar("Test/Loss/Image", avg_image_loss, epoch)
+        writer.add_scalar("Test/Accuracy/Bit", avg_bit_accuracy, epoch)
+
+        # Imágenes ejemplo
+        img_grid_real = make_grid(images[:8].cpu(), nrow=4, normalize=True)
+        img_grid_stego = make_grid(stego_images[:8].cpu(), nrow=4, normalize=True)
+        writer.add_image("Test/Images/Real", img_grid_real, epoch)
+        writer.add_image("Test/Images/Stego", img_grid_stego, epoch)
+
+    encoder.train()
+    decoder.train()
+    discriminator.train()
+
 
 # Entrenamiento
 global_step = 0
@@ -112,6 +126,7 @@ for epoch in range(num_epochs):
     total_disc_loss = 0
     total_adv_loss = 0
     num_batches = 0
+    total_bit_accuracy = 0
 
     for i, (images, _) in enumerate(train_loader):
         images = images.to(device)
@@ -120,6 +135,12 @@ for epoch in range(num_epochs):
         # Paso forward
         stego_images = encoder(images, messages)
         recovered_messages = decoder(stego_images)
+
+        # Bit Accuracy
+        with torch.no_grad():
+            pred_bits = (recovered_messages > 0.5).int()
+            true_bits = messages.int()
+            bit_accuracy = (pred_bits == true_bits).float().mean()
 
         # Discriminador
         real_labels = torch.full((images.size(0), 1), 0.9, device=device)
@@ -138,7 +159,7 @@ for epoch in range(num_epochs):
 
         # El discriminador NO se entrena todos los epochs
         if train_discriminator:
-            if epoch > WARM_UP_LEN and global_step % DISC_FREEZE_WINDOW == 0:
+            if epoch > WARM_UP_LEN and freeze_disc(global_step, epoch):
                 disc_opt.zero_grad()
                 disc_loss.backward()
                 disc_opt.step()
@@ -166,24 +187,30 @@ for epoch in range(num_epochs):
         total_message_loss += message_loss.item()
         total_disc_loss += disc_loss.item()
         total_adv_loss += adv_loss.item()
+        total_bit_accuracy += bit_accuracy.item()
         num_batches += 1
         global_step += 1
 
-        # Promedio por época
+        # Promedio por epoch
         avg_image_loss = total_image_loss / num_batches
         avg_message_loss = total_message_loss / num_batches
         avg_disc_loss = total_disc_loss / num_batches
         avg_adv_loss = total_adv_loss / num_batches
+        avg_bit_accuracy = total_bit_accuracy / num_batches
 
         if i % 100 == 0:
             print(
                 f"Epoch [{epoch + 1}/{num_epochs}], Step [{i}], Image Loss: {image_loss.item():.4f}, Message Loss: {message_loss.item():.4f}, Disc Loss: {disc_loss.item():.4f}")
+
+    if (epoch + 1) % 100 == 0:
+        evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, device, epoch)
 
     # TensorBoard logging por epoch
     writer.add_scalar("Loss/Image", avg_image_loss, epoch)
     writer.add_scalar("Loss/Message", avg_message_loss, epoch)
     writer.add_scalar("Loss/Discriminator", avg_disc_loss, epoch)
     writer.add_scalar("Loss/Adversarial", avg_adv_loss, epoch)
+    writer.add_scalar("Accuracy/Bit", avg_bit_accuracy, epoch)
 
     # Histogramas de pesos y gradientes
     for name, param in encoder.named_parameters():
