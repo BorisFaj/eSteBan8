@@ -1,29 +1,26 @@
+import torch
 import torch.nn as nn
 from transformers import AutoTokenizer, AutoModel
 
-
-class TextCompressor(nn.Module):
-    def __init__(self, output_dim=64, pooling='cls', freeze_bert=True):
-        """
-        :param output_dim: tamaño final del vector comprimido
-        :param pooling: 'cls' o 'mean' para extraer el embedding del texto
-        :param freeze_bert: si True, no entrena DistilBERT (más rápido)
-        """
+class TextCompressorVAE(nn.Module):
+    def __init__(self, latent_dim=512, pooling='cls', freeze_bert=True):
         super().__init__()
         self.tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
         self.bert = AutoModel.from_pretrained("distilbert-base-uncased")
         if freeze_bert:
-            for param in self.bert.parameters():
-                param.requires_grad = False
+            for p in self.bert.parameters():
+                p.requires_grad = False
 
         self.pooling = pooling
-        self.reductor = nn.Linear(768, output_dim)
+        self.fc_mu = nn.Linear(768, latent_dim)
+        self.fc_logvar = nn.Linear(768, latent_dim)
+
+    def reparameterize(self, mu, logvar):
+        std = torch.exp(0.5 * logvar)
+        eps = torch.randn_like(std)
+        return mu + eps * std
 
     def forward(self, texts):
-        """
-        :param texts: lista de strings (batch) o string único
-        :return: tensor (batch_size, output_dim)
-        """
         if isinstance(texts, str):
             texts = [texts]
 
@@ -31,12 +28,15 @@ class TextCompressor(nn.Module):
         inputs = {k: v.to(next(self.parameters()).device) for k, v in inputs.items()}
 
         outputs = self.bert(**inputs)
-        hidden_states = outputs.last_hidden_state  # (batch, seq_len, 768)
+        hidden_states = outputs.last_hidden_state
 
         if self.pooling == 'mean':
-            pooled = hidden_states.mean(dim=1)  # average pooling
+            pooled = hidden_states.mean(dim=1)
         else:
-            pooled = hidden_states[:, 0, :]  # CLS token
+            pooled = hidden_states[:, 0, :]
 
-        reduced = self.reductor(pooled)
-        return reduced  # (batch_size, output_dim)
+        mu = self.fc_mu(pooled)
+        logvar = self.fc_logvar(pooled)
+        z = self.reparameterize(mu, logvar)
+
+        return z, mu, logvar
