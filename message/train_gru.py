@@ -23,7 +23,7 @@ EMBED_DIM = 128
 HIDDEN_DIM = LATENT_DIM
 MAX_LEN = 60
 EPOCHS = 3000
-RUN_NAME = "eSteBert_v1.1s"
+RUN_NAME = "eSteBert_v1.2s"
 
 log_dir = f'./runs/{RUN_NAME}'
 checkpoint_dir = f'./checkpoints/{RUN_NAME}'
@@ -110,12 +110,21 @@ for epoch in range(EPOCHS):
 
     for example in sample_batch:
         input_text = tokenizer.decode(example["input_ids"], skip_special_tokens=True)
+        val_input_ids = example["input_ids"].clone().detach().unsqueeze(0).to(DEVICE)
+
+        val_targets = val_input_ids[:, 1:]  # igual que en training
         with torch.no_grad():
             z, _, _ = compressor(input_text)
             z = z.to(DEVICE)
             output_logits = decoder(z, generate=True, sos_token_id=sos_token_id)
             output_ids = torch.argmax(output_logits, dim=-1)
             decoded_text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+
+            val_logits = decoder(z, sos_token_id=sos_token_id, targets=val_targets, generate=False)[:, :-1, :]
+            val_targets = val_targets[:, :val_logits.size(1)]
+
+            val_loss = criterion(val_logits.reshape(-1, vocab_size), val_targets.reshape(-1))
+            val_ppl = torch.exp(val_loss)
 
         ref = [input_text.split()]
         hyp = decoded_text.split()
@@ -130,6 +139,7 @@ for epoch in range(EPOCHS):
     writer.add_scalar("BLEU/val_avg", sum(bleus) / sample_size, epoch)
     writer.add_scalar("ROUGE1/val_avg", sum(r["rouge1"] for r in rouges) / sample_size, epoch)
     writer.add_scalar("ROUGE-L/val_avg", sum(r["rougeL"] for r in rouges) / sample_size, epoch)
+    writer.add_scalar("Perplexity/val", val_ppl.item(), epoch)
 
     for i, bleu in enumerate(bleus):
         if bleu < 0.3:
