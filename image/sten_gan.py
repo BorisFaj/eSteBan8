@@ -20,7 +20,7 @@ scaler = amp.GradScaler()
 # Parámetros
 WARM_UP_LEN = 50  # numero de epochs que dejo al discriminador sin entrenar
 image_loss_lambda = 0.1  # Parametro para darle algo de tolerancia al image loss
-DISC_FREEZE_WINDOW = 15  # ventana de epochs que se queda sin entrenar el discriminador despues del warmup
+DISC_FREEZE_WINDOW = 15  # ventana MAXIMA de epochs que se queda sin entrenar el discriminador despues del warmup
 k = 0.005
 
 def freeze_disc(global_step: int, epoch: int) -> int:
@@ -30,9 +30,11 @@ def freeze_disc(global_step: int, epoch: int) -> int:
 image_channels = 3
 image_size = 32
 message_size = 128  # Aumentar a 512
-batch_size = 2
+batch_size = 4
 num_epochs = 5000
-RUN_NAME = "StenGan8"
+IMAGE_INPUT_RES = 128  # resolucion de la imagen de entrada
+EPOCHS_TO_VAL = 20  # numero de epochs entre validaciones
+RUN_NAME = "eSteBan8.3s"
 log_dir = f'./runs/{RUN_NAME}'
 checkpoint_dir = f'./checkpoints/{RUN_NAME}'
 
@@ -43,10 +45,10 @@ os.makedirs(checkpoint_dir, exist_ok=True)
 writer = SummaryWriter(log_dir)
 
 
-# Dataset Open Images (resolución (256, 256))
+# Dataset Open Images (resolución (IMAGE_INPUT_RES, IMAGE_INPUT_RES))
 transform = transforms.Compose([
-    transforms.Resize((256, 256)),
-    transforms.CenterCrop((256, 256)),
+    transforms.Resize((IMAGE_INPUT_RES, IMAGE_INPUT_RES)),
+    transforms.CenterCrop((IMAGE_INPUT_RES, IMAGE_INPUT_RES)),
     transforms.ToTensor(),
     transforms.Normalize((0.5,), (0.5,))
 ])
@@ -80,22 +82,27 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
     total_bit_accuracy = 0
     num_batches = 0
 
-    bce = nn.BCELoss()
+    bce = nn.BCEWithLogitsLoss()
 
     with torch.no_grad():
         for i, (images, _) in enumerate(test_loader):
             images = images.to(device)
             messages = torch.randint(0, 2, (images.size(0), message_size)).float().to(device)
 
+            # Forward
             stego_images = encoder(images, messages)
             recovered_messages = decoder(stego_images)
 
+            # Denormalizar imágenes para SSIM (de [-1,1] → [0,1])
+            images_01 = (images + 1) / 2
+            stego_images_01 = (stego_images + 1) / 2
+
             # Métricas
             message_loss = bce(recovered_messages, messages)
-            image_loss = (1 - ssim(stego_images, images, data_range=1.0, size_average=True)) + \
+            image_loss = (1 - ssim(stego_images_01, images_01, data_range=1.0, size_average=True)) + \
                          image_loss_lambda * F.mse_loss(stego_images, images)
 
-            pred_bits = (recovered_messages > 0.5).int()
+            pred_bits = (torch.sigmoid(recovered_messages) > 0.5).int()
             true_bits = messages.int()
             bit_accuracy = (pred_bits == true_bits).float().mean()
 
@@ -113,14 +120,15 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
         writer.add_scalar("Test/Accuracy/Bit", avg_bit_accuracy, epoch)
 
         # Imágenes ejemplo
-        img_grid_real = make_grid(images[:8].cpu(), nrow=4, normalize=True)
-        img_grid_stego = make_grid(stego_images[:8].cpu(), nrow=4, normalize=True)
+        img_grid_real = make_grid(images_01[:8].cpu(), nrow=4, normalize=True)
+        img_grid_stego = make_grid(stego_images_01[:8].cpu(), nrow=4, normalize=True)
         writer.add_image("Test/Images/Real", img_grid_real, epoch)
         writer.add_image("Test/Images/Stego", img_grid_stego, epoch)
 
     encoder.train()
     decoder.train()
     discriminator.train()
+
 
 
 # Entrenamiento
@@ -211,10 +219,12 @@ for epoch in range(num_epochs):
 
         if i % 100 == 0:
             print(
-                f"Epoch [{epoch + 1}/{num_epochs}], Step [{i}], Image Loss: {image_loss.item():.4f}, Message Loss: {message_loss.item():.4f}, Disc Loss: {disc_loss.item():.4f}")
+                f"Epoch [{epoch + 1}/{num_epochs}], Step [{i}], Image Loss: {avg_image_loss:.4f}, Message Loss: {avg_message_loss:.4f}, "
+                f"Disc Loss: {avg_disc_loss:.4f}, Adv Loss: {avg_adv_loss:.4f}, Bit Acc: {avg_bit_accuracy:.4f},")
 
-    if (epoch + 1) % 100 == 0:
+    if (epoch + 1) % EPOCHS_TO_VAL == 0:
         evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, device, epoch)
+        print("Evaluado sobre el test wey")
 
     # TensorBoard logging por epoch
     writer.add_scalar("Loss/Image", avg_image_loss, epoch)

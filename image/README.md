@@ -1,4 +1,4 @@
-# StenGAN
+# eSteBan8
 
 Este proyecto implementa un sistema de esteganografía basado en GANs donde un mensaje binario es ocultado dentro de una imagen y luego recuperado, mientras se intenta mantener la imagen resultante visualmente similar a la original.
 
