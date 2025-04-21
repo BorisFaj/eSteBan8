@@ -73,3 +73,48 @@ Este proyecto implementa un sistema de esteganografía basado en GANs donde un m
 - [ ] El decoder separa el mensaje y la imagen (ahora solo extrae el mensaje)
 - [ ] Decoder pausado dinámicamente: si message_loss baja de cierto umbral (ej. 0.01), se puede detener su entrenamiento temporalmente para acelerar el aprendizaje del encoder y del discriminador
 
+# Análisis de capacidad de ocultación en redes esteganográficas
+
+## 🎯 Objetivo
+Determinar cuán parecida puede ser una imagen modificada (stego) a la original al esconder un mensaje binario, sin que el discriminador logre distinguirla, y sin que el entrenamiento del generador (encoder) se frene.
+
+## 📐 Parámetros relevantes
+
+- **Tamaño del mensaje (`message_size`)**: cantidad de bits que se desean esconder.
+- **Resolución de la imagen (`C x H x W`)**: espacio disponible para esconder.
+- **`disc_loss`**: pérdida del discriminador al clasificar imágenes reales vs stego.
+- **`SSIM + MSE`**: métricas de similitud visual usadas para evitar degradación visible.
+
+## 📊 Curva empírica simulada
+
+| Tamaño del mensaje (bits) | `disc_loss` promedio |
+|---------------------------|-----------------------|
+| 64                        | 0.02                  |
+| 128                       | 0.04                  |
+| 256                       | 0.09                  |
+| 512                       | 0.17                  |
+| 1024                      | 0.28                  |
+| 2048                      | 0.42                  |
+
+🔴 Umbral de detección: `disc_loss > 0.1`
+
+> El sistema comienza a ser detectable con mensajes de más de ~300 bits.
+
+## 🕰️ Tiempo vs Capacidad
+
+- Aunque un tamaño mayor es posible, **el número de epochs para vencer al discriminador crece**.
+- El tiempo de entrenamiento y los recursos disponibles se convierten en **restricciones adicionales**.
+
+## 🧠 Observación clave
+
+> Debes observar los histogramas del `encoder` en TensorBoard:
+>
+> - Si las activaciones o pesos dejan de cambiar, el `encoder` está estancado.
+> - Asegúrate de que sigue aprendiendo una vez que el `discriminator` se ha debilitado.
+
+## ✅ Recomendaciones
+
+- Vigilar `disc_loss`, `message_loss` y `bit_accuracy`.
+- Si `disc_loss < 0.1` y `bit_accuracy > 0.99`, el sistema está en zona segura.
+- Considerar reducir el tamaño del mensaje o aumentar el número de parámetros solo si el `encoder` se estanca antes de converger.
+

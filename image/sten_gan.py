@@ -221,9 +221,9 @@ for epoch in range(start_epoch, num_epochs):
 
             # WarmUP
             if epoch < WARM_UP_LEN:
-                total_loss = image_loss + message_loss
+                total_loss = message_loss
             else:
-                total_loss = image_loss + message_loss + _adv_loss
+                total_loss = message_loss + _adv_loss
 
         enc_dec_opt.zero_grad()
         scaler.scale(total_loss).backward()
