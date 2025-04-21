@@ -12,13 +12,14 @@ from encoder import Encoder
 from discriminator import Discriminator
 from torch import amp
 import math
+from style_loss import StyleLossHelper
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 scaler = amp.GradScaler()
 
 # Parámetros
-WARM_UP_LEN = 50  # numero de epochs que dejo al discriminador sin entrenar
+WARM_UP_LEN = 30  # numero de epochs que dejo al discriminador sin entrenar
 image_loss_lambda = 0.9  # Parametro para darle algo de tolerancia al image loss
 DISC_FREEZE_WINDOW = 15  # ventana MAXIMA de epochs que se queda sin entrenar el discriminador despues del warmup
 FREEZE_DISC_LOSS = 0.3  # loss maximo que alcanza el discriminador antes de ser congelado
@@ -37,7 +38,8 @@ num_epochs = 5000
 IMAGE_INPUT_RES = 128  # resolucion de la imagen de entrada
 EPOCHS_TO_VAL = 20  # numero de epochs entre validaciones
 EPOCHS_TO_SAVE = 10  # numero de epochs para guardar el modelo
-RUN_NAME = "eSteBan8"
+noise_std = 0.02  # ruido que se le mete a la imagen generada. Entre 0.01 y 0.05 es razonable para imágenes normalizadas
+RUN_NAME = "eSteBan8s"
 log_dir = f'./runs/{RUN_NAME}'
 checkpoint_dir = f'./checkpoints/{RUN_NAME}'
 
@@ -83,9 +85,11 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
     total_message_loss = 0
     total_image_loss = 0
     total_bit_accuracy = 0
+    total_style_loss = 0
     num_batches = 0
 
     bce = nn.BCEWithLogitsLoss()
+    style_loss_helper = StyleLossHelper(device)
 
     with torch.no_grad():
         for i, (images, _) in enumerate(test_loader):
@@ -112,15 +116,20 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
             total_message_loss += message_loss.item()
             total_image_loss += image_loss.detach().item()
             total_bit_accuracy += bit_accuracy.item()
+            total_style_loss += style_loss_helper(images_01, stego_images_01).item()  # Ojo! Esto chupa!
+
+
             num_batches += 1
 
         avg_message_loss = total_message_loss / num_batches
         avg_image_loss = total_image_loss / num_batches
         avg_bit_accuracy = total_bit_accuracy / num_batches
+        avg_style_loss = total_style_loss / num_batches
 
         writer.add_scalar("Test/Loss/Message", avg_message_loss, epoch)
         writer.add_scalar("Test/Loss/Image", avg_image_loss, epoch)
         writer.add_scalar("Test/Accuracy/Bit", avg_bit_accuracy, epoch)
+        writer.add_scalar("Test/Style/Loss", avg_style_loss, epoch)
 
         # Imágenes ejemplo
         img_grid_real = make_grid(images_01[:8].cpu(), nrow=4, normalize=True)
@@ -150,6 +159,16 @@ def load_latest_checkpoint(checkpoint_dir, encoder, decoder, discriminator, enc_
 
     return latest_epoch
 
+def get_noisy(image):
+    if noise_std > 0:
+        noise = torch.randn_like(image) * noise_std
+        _image = image + noise
+        _image = torch.clamp(image, -1, 1)  # mantén en el rango [-1, 1]
+
+        return _image
+    else:
+        return image
+
 
 # Entrenamiento
 global_step = 0
@@ -163,7 +182,13 @@ for epoch in range(start_epoch, num_epochs):
     total_bit_accuracy = 0
 
     for i, (images, _) in enumerate(train_loader):
-        images = images.to(device)
+        images = get_noisy(images).to(device)
+
+        if noise_std > 0:
+            noise = torch.randn_like(images) * noise_std
+            images = images + noise
+            images = torch.clamp(images, -1, 1)  # mantén en el rango [-1, 1]
+
         messages = torch.randint(0, 2, (images.size(0), message_size)).float().to(device)
 
         # Paso forward
@@ -212,18 +237,12 @@ for epoch in range(start_epoch, num_epochs):
             message_loss = bce(recovered_messages, messages)
             adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
 
-
-            # Si no estamos entrenando el discriminador, no lo metemos en el total_loss
-            if train_discriminator:
-                _adv_loss = adv_loss
-            else:
-                _adv_loss = 0
-
             # WarmUP
-            if epoch < WARM_UP_LEN:
-                total_loss = message_loss
+            if epoch < WARM_UP_LEN or not train_discriminator:
+                total_loss = message_loss # Si no entrena discriminador, tampoco entra el total_loss
             else:
-                total_loss = message_loss + _adv_loss
+                total_loss = message_loss + adv_loss
+
 
         enc_dec_opt.zero_grad()
         scaler.scale(total_loss).backward()
