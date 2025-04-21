@@ -19,22 +19,25 @@ scaler = amp.GradScaler()
 
 # Parámetros
 WARM_UP_LEN = 50  # numero de epochs que dejo al discriminador sin entrenar
-image_loss_lambda = 0.1  # Parametro para darle algo de tolerancia al image loss
+image_loss_lambda = 0.9  # Parametro para darle algo de tolerancia al image loss
 DISC_FREEZE_WINDOW = 15  # ventana MAXIMA de epochs que se queda sin entrenar el discriminador despues del warmup
-k = 0.005
+FREEZE_DISC_LOSS = 0.3  # loss maximo que alcanza el discriminador antes de ser congelado
 
-def freeze_disc(global_step: int, epoch: int) -> int:
+
+def freeze_disc(global_step: int, epoch: int, k: float=0.005) -> int:
+
     freeze_window = max(1, int(DISC_FREEZE_WINDOW * math.exp(-k * epoch)))
     return global_step % freeze_window == 0
 
 image_channels = 3
 image_size = 32
 message_size = 128  # Aumentar a 512
-batch_size = 4
+batch_size = 2
 num_epochs = 5000
 IMAGE_INPUT_RES = 128  # resolucion de la imagen de entrada
 EPOCHS_TO_VAL = 20  # numero de epochs entre validaciones
-RUN_NAME = "eSteBan8.3s"
+EPOCHS_TO_SAVE = 10  # numero de epochs para guardar el modelo
+RUN_NAME = "eSteBan8"
 log_dir = f'./runs/{RUN_NAME}'
 checkpoint_dir = f'./checkpoints/{RUN_NAME}'
 
@@ -130,10 +133,28 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
     discriminator.train()
 
 
+def load_latest_checkpoint(checkpoint_dir, encoder, decoder, discriminator, enc_dec_opt, disc_opt):
+    checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith(".pt") and "encoder" in f]
+    if not checkpoints:
+        return 0  # No checkpoint found, start from epoch 0
+
+    # Extraer el número de epoch del nombre de archivo
+    get_epoch = lambda f: int(f.split("_epoch")[1].split(".pt")[0])
+    latest_epoch = max(get_epoch(f) for f in checkpoints)
+
+    print(f"🔁 Cargando checkpoint del epoch {latest_epoch}")
+
+    encoder.load_state_dict(torch.load(os.path.join(checkpoint_dir, f"encoder_epoch{latest_epoch}.pt")))
+    decoder.load_state_dict(torch.load(os.path.join(checkpoint_dir, f"decoder_epoch{latest_epoch}.pt")), strict=False)
+    discriminator.load_state_dict(torch.load(os.path.join(checkpoint_dir, f"discriminator_epoch{latest_epoch}.pt")))
+
+    return latest_epoch
+
 
 # Entrenamiento
 global_step = 0
-for epoch in range(num_epochs):
+start_epoch = load_latest_checkpoint(checkpoint_dir, encoder, decoder, discriminator, enc_dec_opt, disc_opt)
+for epoch in range(start_epoch, num_epochs):
     total_image_loss = 0
     total_message_loss = 0
     total_disc_loss = 0
@@ -167,7 +188,7 @@ for epoch in range(num_epochs):
             disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
                         F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
 
-            if disc_loss.item() < 0.1:
+            if disc_loss.item() <= FREEZE_DISC_LOSS:
                 train_discriminator = False
             else:
                 train_discriminator = True
@@ -191,11 +212,18 @@ for epoch in range(num_epochs):
             message_loss = bce(recovered_messages, messages)
             adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
 
+
+            # Si no estamos entrenando el discriminador, no lo metemos en el total_loss
+            if train_discriminator:
+                _adv_loss = adv_loss
+            else:
+                _adv_loss = 0
+
             # WarmUP
             if epoch < WARM_UP_LEN:
                 total_loss = image_loss + message_loss
             else:
-                total_loss = image_loss + message_loss + adv_loss
+                total_loss = image_loss + message_loss + _adv_loss
 
         enc_dec_opt.zero_grad()
         scaler.scale(total_loss).backward()
@@ -254,8 +282,8 @@ for epoch in range(num_epochs):
     writer.add_image("Images/Stego", img_grid_stego, epoch)
 
 
-    # Guardar modelos cada 400 epochs
-    if (epoch + 1) % 400 == 0:
+    # Guardar modelos cada EPOCHS_TO_SAVE epochs
+    if (epoch + 1) % EPOCHS_TO_SAVE == 0:
         torch.save(encoder.state_dict(), os.path.join(checkpoint_dir, f"encoder_epoch{epoch+1}.pt"))
         torch.save(decoder.state_dict(), os.path.join(checkpoint_dir, f"decoder_epoch{epoch+1}.pt"))
         torch.save(discriminator.state_dict(), os.path.join(checkpoint_dir, f"discriminator_epoch{epoch+1}.pt"))
