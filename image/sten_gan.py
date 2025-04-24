@@ -1,82 +1,53 @@
 import torch
 import torch.nn as nn
-from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
 from pytorch_msssim import ssim
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 import torch.nn.functional as F
-import os
 from decoder import Decoder
 from encoder import Encoder
 from discriminator import Discriminator
 from torch import amp
 import math
 from style_loss import StyleLossHelper
+from dotenv import load_dotenv
+import os
+from data_handler import DataHandler
 
+load_dotenv()
+
+torch.set_float32_matmul_precision('high')
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
 scaler = amp.GradScaler()
 
-# Parámetros
-WARM_UP_LEN = 30  # numero de epochs que dejo al discriminador sin entrenar
-image_loss_lambda = 0.9  # Parametro para darle algo de tolerancia al image loss
-DISC_FREEZE_WINDOW = 15  # ventana MAXIMA de epochs que se queda sin entrenar el discriminador despues del warmup
-FREEZE_DISC_LOSS = 0.3  # loss maximo que alcanza el discriminador antes de ser congelado
+WARM_UP_LEN = int(os.getenv("WARM_UP_LEN"))  # numero de epochs que dejo al discriminador sin entrenar
+image_loss_lambda = float(os.getenv("image_loss_lambda"))  # Parametro para darle algo de tolerancia al image loss
+DISC_FREEZE_WINDOW = int(os.getenv("DISC_FREEZE_WINDOW"))  # ventana MAXIMA de epochs que se queda sin entrenar el discriminador despues del warmup
+FREEZE_DISC_LOSS = float(os.getenv("FREEZE_DISC_LOSS"))  # loss maximo que alcanza el discriminador antes de ser congelado
 
+image_channels = int(os.getenv("image_channels"))
+image_size = int(os.getenv("image_size"))
+message_size = int(os.getenv("message_size"))  # Aumentar a 512
+batch_size = int(os.getenv("batch_size"))
+num_epochs = int(os.getenv("num_epochs"))
+IMAGE_INPUT_RES = int(os.getenv("IMAGE_INPUT_RES"))  # resolucion de la imagen de entrada
+EPOCHS_TO_VAL = int(os.getenv("EPOCHS_TO_VAL"))  # numero de epochs entre validaciones
+EPOCHS_TO_SAVE = int(os.getenv("EPOCHS_TO_SAVE"))  # numero de epochs para guardar el modelo
+noise_std = float(os.getenv("noise_std"))  # ruido que se le mete a la imagen generada. Entre 0.01 y 0.05 es razonable para imágenes normalizadas
+RUN_NAME = os.getenv("RUN_NAME")
+log_dir = os.getenv("log_dir")
+checkpoint_dir = os.getenv("checkpoint_dir")
+
+os.makedirs(log_dir, exist_ok=True)
+os.makedirs(checkpoint_dir, exist_ok=True)
 
 def freeze_disc(global_step: int, epoch: int, k: float=0.005) -> int:
 
     freeze_window = max(1, int(DISC_FREEZE_WINDOW * math.exp(-k * epoch)))
     return global_step % freeze_window == 0
 
-image_channels = 3
-image_size = 32
-message_size = 128  # Aumentar a 512
-batch_size = 2
-num_epochs = 5000
-IMAGE_INPUT_RES = 128  # resolucion de la imagen de entrada
-EPOCHS_TO_VAL = 20  # numero de epochs entre validaciones
-EPOCHS_TO_SAVE = 10  # numero de epochs para guardar el modelo
-noise_std = 0.02  # ruido que se le mete a la imagen generada. Entre 0.01 y 0.05 es razonable para imágenes normalizadas
-RUN_NAME = "eSteBan8s"
-log_dir = f'./runs/{RUN_NAME}'
-checkpoint_dir = f'./checkpoints/{RUN_NAME}'
 
-os.makedirs(log_dir, exist_ok=True)
-os.makedirs(checkpoint_dir, exist_ok=True)
-
-# TensorBoard writer
-writer = SummaryWriter(log_dir)
-
-
-# Dataset Open Images (resolución (IMAGE_INPUT_RES, IMAGE_INPUT_RES))
-transform = transforms.Compose([
-    transforms.Resize((IMAGE_INPUT_RES, IMAGE_INPUT_RES)),
-    transforms.CenterCrop((IMAGE_INPUT_RES, IMAGE_INPUT_RES)),
-    transforms.ToTensor(),
-    transforms.Normalize((0.5,), (0.5,))
-])
-
-train_dataset = datasets.ImageFolder(root="openimages_custom/train", transform=transform)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-
-test_dataset = datasets.ImageFolder(root="openimages_custom/val", transform=transform)
-test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
-
-
-# Inicialización
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-encoder = Encoder(image_channels=image_channels, message_size=message_size, image_size=image_size).to(device)
-decoder = Decoder(image_channels=image_channels, message_size=message_size).to(device)
-discriminator = Discriminator(image_channels=image_channels).to(device)
-
-enc_dec_opt = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-4)
-disc_opt = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
-
-bce = nn.BCEWithLogitsLoss()
-
-# TEST
 def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, device, epoch):
     encoder.eval()
     decoder.eval()
@@ -92,9 +63,9 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
     style_loss_helper = StyleLossHelper(device)
 
     with torch.no_grad():
-        for i, (images, _) in enumerate(test_loader):
+        for i, (images, messages) in enumerate(test_loader):
             images = images.to(device)
-            messages = torch.randint(0, 2, (images.size(0), message_size)).float().to(device)
+            messages = messages.to(device)
 
             # Forward
             stego_images = encoder(images, messages)
@@ -142,10 +113,15 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
     discriminator.train()
 
 
-def load_latest_checkpoint(checkpoint_dir, encoder, decoder, discriminator, enc_dec_opt, disc_opt):
-    checkpoints = [f for f in os.listdir(checkpoint_dir) if f.endswith(".pt") and "encoder" in f]
-    if not checkpoints:
-        return 0  # No checkpoint found, start from epoch 0
+def load_latest_checkpoint(checkpoint_dir: str, run_name: str, encoder, decoder, discriminator):
+    _check_point_dir = os.path.join(checkpoint_dir, run_name)
+
+    if os.path.exists(_check_point_dir):
+        checkpoints = [f for f in os.listdir(_check_point_dir) if f.endswith(".pt") and "encoder" in f]
+        if not checkpoints:
+            return 0  # No checkpoint found, start from epoch 0
+    else:
+        return 0
 
     # Extraer el número de epoch del nombre de archivo
     get_epoch = lambda f: int(f.split("_epoch")[1].split(".pt")[0])
@@ -153,9 +129,9 @@ def load_latest_checkpoint(checkpoint_dir, encoder, decoder, discriminator, enc_
 
     print(f"🔁 Cargando checkpoint del epoch {latest_epoch}")
 
-    encoder.load_state_dict(torch.load(os.path.join(checkpoint_dir, f"encoder_epoch{latest_epoch}.pt")))
-    decoder.load_state_dict(torch.load(os.path.join(checkpoint_dir, f"decoder_epoch{latest_epoch}.pt")), strict=False)
-    discriminator.load_state_dict(torch.load(os.path.join(checkpoint_dir, f"discriminator_epoch{latest_epoch}.pt")))
+    encoder.load_state_dict(torch.load(os.path.join(_check_point_dir, f"encoder_epoch{latest_epoch}.pt")))
+    decoder.load_state_dict(torch.load(os.path.join(_check_point_dir, f"decoder_epoch{latest_epoch}.pt")), strict=False)
+    discriminator.load_state_dict(torch.load(os.path.join(_check_point_dir, f"discriminator_epoch{latest_epoch}.pt")))
 
     return latest_epoch
 
@@ -163,16 +139,29 @@ def get_noisy(image):
     if noise_std > 0:
         noise = torch.randn_like(image) * noise_std
         _image = image + noise
-        _image = torch.clamp(image, -1, 1)  # mantén en el rango [-1, 1]
+        _image = torch.clamp(_image, -1, 1)
 
         return _image
     else:
         return image
 
-
 # Entrenamiento
+writer = SummaryWriter(log_dir)
+
+train_dataset, train_loader, test_dataset, test_loader = DataHandler(batch_size=batch_size).get()
+
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+encoder = Encoder(image_channels=image_channels, message_size=message_size, image_size=image_size).to(device)
+decoder = Decoder(image_channels=image_channels, message_size=message_size).to(device)
+discriminator = Discriminator(image_channels=image_channels).to(device)
+
+enc_dec_opt = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-4)
+disc_opt = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
+
+bce = nn.BCEWithLogitsLoss()
+
 global_step = 0
-start_epoch = load_latest_checkpoint(checkpoint_dir, encoder, decoder, discriminator, enc_dec_opt, disc_opt)
+start_epoch = load_latest_checkpoint(checkpoint_dir, RUN_NAME, encoder, decoder, discriminator)
 for epoch in range(start_epoch, num_epochs):
     total_image_loss = 0
     total_message_loss = 0
@@ -181,7 +170,7 @@ for epoch in range(start_epoch, num_epochs):
     num_batches = 0
     total_bit_accuracy = 0
 
-    for i, (images, _) in enumerate(train_loader):
+    for i, (images, messages) in enumerate(train_loader):
         images = get_noisy(images).to(device)
 
         if noise_std > 0:
@@ -189,10 +178,7 @@ for epoch in range(start_epoch, num_epochs):
             images = images + noise
             images = torch.clamp(images, -1, 1)  # mantén en el rango [-1, 1]
 
-        messages = torch.randint(0, 2, (images.size(0), message_size)).float().to(device)
-
         # Paso forward
-        torch.cuda.empty_cache()
         with amp.autocast("cuda"):
             stego_images = encoder(images, messages)
             recovered_messages = decoder(stego_images)
@@ -263,6 +249,8 @@ for epoch in range(start_epoch, num_epochs):
         avg_disc_loss = total_disc_loss / num_batches
         avg_adv_loss = total_adv_loss / num_batches
         avg_bit_accuracy = total_bit_accuracy / num_batches
+
+        torch.cuda.empty_cache()
 
         if i % 100 == 0:
             print(

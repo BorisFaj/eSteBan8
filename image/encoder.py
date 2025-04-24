@@ -23,6 +23,9 @@ class Encoder(nn.Module):
         self.tanh = nn.Tanh()
 
     def forward(self, image, message):
+        image = image.to(self.conv1.weight.device)
+        message = message.to(self.conv1.weight.device)
+
         B, C, H, W = image.shape
         msg_map = message.view(B, self.message_size, 1, 1).expand(B, self.message_size, H, W)
         x = torch.cat([image, msg_map], dim=1)

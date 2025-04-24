@@ -64,14 +64,14 @@ Este proyecto implementa un sistema de esteganografía basado en GANs donde un m
 
 ## Cosas pendientes / ToDo
 
-- [ ] Explorar diferentes valores de `image_loss_lambda` (0.01, 0.1, 0.5...)
-- [ ] Comparar resultados visuales y métricas por valor de lambda
-- [ ] Evaluar la precisión del mensaje recuperado (`bit accuracy`)
+- [x] Explorar diferentes valores de `image_loss_lambda` (0.01, 0.1, 0.5...)
+- [x] Evaluar la precisión del mensaje recuperado (`bit accuracy`)
 - [x] Probar `Tanh` vs `Sigmoid` en la salida del encoder (ya aplicado: usando Tanh)
-- [ ] Escalar a imágenes más grandes o usar datasets más realistas (e.g. CelebA)
-- [ ] Añadir modo de inferencia: cargar un modelo y visualizar imagen + mensaje recuperado
+- [x] Escalar a imágenes más grandes o usar datasets más realistas (e.g. CelebA)
+- [x] Añadir modo de inferencia: cargar un modelo y visualizar imagen + mensaje recuperado
 - [ ] El decoder separa el mensaje y la imagen (ahora solo extrae el mensaje)
 - [ ] Decoder pausado dinámicamente: si message_loss baja de cierto umbral (ej. 0.01), se puede detener su entrenamiento temporalmente para acelerar el aprendizaje del encoder y del discriminador
+- [ ] Cuando el generador sea capaz de generar imagenes reales, evaluar el discriminador con la imagen SIN ruido
 
 # Análisis de capacidad de ocultación en redes esteganográficas
 
