@@ -18,6 +18,6 @@ class Discriminator(nn.Module):
         x = x.view(B, -1)
 
         if self.fc is None:
-            self.fc = nn.Linear(C * H * W, 1).to(x.device)
+            self.fc = nn.Linear(C * H * W, 1).to(x.device).half()
 
         return torch.sigmoid(self.fc(x))

@@ -19,7 +19,7 @@ class Decoder(nn.Module):
         x = x.reshape(B, -1)
 
         if not self._fc_initialized:
-            self.fc = nn.Linear(C * H * W, self.message_size).to(x.device)
+            self.fc = nn.Linear(C * H * W, self.message_size).to(x.device).half()
             self._fc_initialized = True
             self.add_module("fc", self.fc)  # Registra como parte del modelo
             print("🧠 Decoder creado")
