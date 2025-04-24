@@ -13,14 +13,17 @@ from style_loss import StyleLossHelper
 from dotenv import load_dotenv
 import os
 from data_handler import DataHandler
-
+from start_experiment import start_mlflow
 load_dotenv()
 
+# Cuda
 torch.set_float32_matmul_precision('high')
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "expandable_segments:True"
 
+# Scaler
 scaler = amp.GradScaler()
 
+# Parametros de las redes
 WARM_UP_LEN = int(os.getenv("WARM_UP_LEN"))  # numero de epochs que dejo al discriminador sin entrenar
 image_loss_lambda = float(os.getenv("image_loss_lambda"))  # Parametro para darle algo de tolerancia al image loss
 DISC_FREEZE_WINDOW = int(os.getenv("DISC_FREEZE_WINDOW"))  # ventana MAXIMA de epochs que se queda sin entrenar el discriminador despues del warmup
@@ -36,12 +39,29 @@ EPOCHS_TO_VAL = int(os.getenv("EPOCHS_TO_VAL"))  # numero de epochs entre valida
 EPOCHS_TO_SAVE = int(os.getenv("EPOCHS_TO_SAVE"))  # numero de epochs para guardar el modelo
 noise_std = float(os.getenv("noise_std"))  # ruido que se le mete a la imagen generada. Entre 0.01 y 0.05 es razonable para imágenes normalizadas
 RUN_NAME = os.getenv("RUN_NAME")
+
+# Checkpoints
+checkpoint_dir = os.getenv("checkpoint_dir")
+os.makedirs(checkpoint_dir, exist_ok=True)
+
+# Tensorboard
 log_dir = os.getenv("log_dir")
 log_dir = os.path.join(log_dir, RUN_NAME)
-checkpoint_dir = os.getenv("checkpoint_dir")
-
 os.makedirs(log_dir, exist_ok=True)
-os.makedirs(checkpoint_dir, exist_ok=True)
+
+# MLFlow
+mlflow = start_mlflow({"warm_up_len": WARM_UP_LEN,
+                       "image_loss_lambda": image_loss_lambda,
+                       "disc_freeze_windows": DISC_FREEZE_WINDOW,
+                       "freeze_disc_loss": FREEZE_DISC_LOSS,
+                       "image_channels": image_channels,
+                       "image_size": image_size,
+                       "num_epochs": num_epochs,
+                       "image_input_res": IMAGE_INPUT_RES,
+                       "epochs_to_val": EPOCHS_TO_VAL,
+                       "epochs_to_save": EPOCHS_TO_SAVE,
+                       "noise_std": noise_std},
+                      run_name=RUN_NAME)
 
 def freeze_disc(global_step: int, epoch: int, k: float=0.005) -> int:
 
@@ -97,6 +117,11 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
         avg_image_loss = total_image_loss / num_batches
         avg_bit_accuracy = total_bit_accuracy / num_batches
         avg_style_loss = total_style_loss / num_batches
+
+        mlflow.log_metric("Test/Loss/Image", avg_image_loss, step=epoch)
+        mlflow.log_metric("Test/Loss/Message", avg_message_loss, step=epoch)
+        mlflow.log_metric("Test/Loss/Adversarial", avg_style_loss, step=epoch)
+        mlflow.log_metric("Test/Accuracy/Bit", avg_bit_accuracy, step=epoch)
 
         writer.add_scalar("Test/Loss/Message", avg_message_loss, epoch)
         writer.add_scalar("Test/Loss/Image", avg_image_loss, epoch)
@@ -249,7 +274,7 @@ for epoch in range(start_epoch, num_epochs):
         num_batches += 1
         global_step += 1
 
-        del total_loss, message_loss, adv_loss, stego_images, recovered_messages, disc_pred
+        del total_loss, message_loss, adv_loss, recovered_messages, disc_pred
         torch.cuda.empty_cache()
 
         # Promedio por epoch
@@ -268,13 +293,19 @@ for epoch in range(start_epoch, num_epochs):
         evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, device, epoch)
         print("Evaluado sobre el test wey")
 
+    # MLFlow logging por epoch
+    mlflow.log_metric("Loss/Image", avg_image_loss, step=epoch)
+    mlflow.log_metric("Loss/Message", avg_message_loss, step=epoch)
+    mlflow.log_metric("Loss/Discriminator", avg_disc_loss, step=epoch)
+    mlflow.log_metric("Accuracy/Bit", avg_bit_accuracy, step=epoch)
+    mlflow.log_metric("Accuracy/Adversarial", avg_adv_loss, step=epoch)
+
     # TensorBoard logging por epoch
     writer.add_scalar("Loss/Image", avg_image_loss, epoch)
     writer.add_scalar("Loss/Message", avg_message_loss, epoch)
     writer.add_scalar("Loss/Discriminator", avg_disc_loss, epoch)
     writer.add_scalar("Loss/Adversarial", avg_adv_loss, epoch)
     writer.add_scalar("Accuracy/Bit", avg_bit_accuracy, epoch)
-
     # Histogramas de pesos y gradientes
     for name, param in encoder.named_parameters():
         writer.add_histogram(f"Encoder/weights/{name}", param, global_step)
@@ -295,7 +326,6 @@ for epoch in range(start_epoch, num_epochs):
     writer.add_image("Images/Real", img_grid_real, epoch)
     writer.add_image("Images/Stego", img_grid_stego, epoch)
 
-
     # Guardar modelos cada EPOCHS_TO_SAVE epochs
     if (epoch + 1) % EPOCHS_TO_SAVE == 0:
         torch.save(encoder.state_dict(), os.path.join(checkpoint_dir, f"encoder_epoch{epoch+1}.pt"))
@@ -303,4 +333,13 @@ for epoch in range(start_epoch, num_epochs):
         torch.save(discriminator.state_dict(), os.path.join(checkpoint_dir, f"discriminator_epoch{epoch+1}.pt"))
         print(f"Modelos guardados en epoch {epoch+1}")
 
-writer.close()
+        mlflow.pytorch.log_model(encoder, "encoder", registered_model_name="EncoderModel")
+        mlflow.pytorch.log_model(decoder, "decoder", registered_model_name="DecoderModel")
+        mlflow.pytorch.log_model(discriminator, "discriminator", registered_model_name="DiscriminatorModel")
+
+        mlflow.log_artifact(os.path.join(checkpoint_dir, f"encoder_epoch{epoch + 1}.pt"))
+
+        print(f"Modelos guardados en epoch MLFlow")
+
+
+mlflow.end_run()
