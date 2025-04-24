@@ -37,6 +37,7 @@ EPOCHS_TO_SAVE = int(os.getenv("EPOCHS_TO_SAVE"))  # numero de epochs para guard
 noise_std = float(os.getenv("noise_std"))  # ruido que se le mete a la imagen generada. Entre 0.01 y 0.05 es razonable para imágenes normalizadas
 RUN_NAME = os.getenv("RUN_NAME")
 log_dir = os.getenv("log_dir")
+log_dir = os.path.join(log_dir, RUN_NAME)
 checkpoint_dir = os.getenv("checkpoint_dir")
 
 os.makedirs(log_dir, exist_ok=True)
@@ -147,14 +148,16 @@ def get_noisy(image):
 
 # Entrenamiento
 writer = SummaryWriter(log_dir)
+writer.add_text("Entrenamiento", "Iniciado correctamente", 0)
+writer.flush()
 
 train_dataset, train_loader, test_dataset, test_loader = DataHandler(batch_size=batch_size).get()
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-# Fuerza float16
-encoder = Encoder(image_channels=image_channels, message_size=message_size, image_size=image_size).half().to(device)
-decoder = Decoder(image_channels=image_channels, message_size=message_size).half().to(device)
-discriminator = Discriminator(image_channels=image_channels).half().to(device)
+
+encoder = Encoder(image_channels=image_channels, message_size=message_size, image_size=image_size).to(device)
+decoder = Decoder(image_channels=image_channels, message_size=message_size).to(device)
+discriminator = Discriminator(image_channels=image_channels).to(device)
 
 enc_dec_opt = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-4)
 disc_opt = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
@@ -173,8 +176,8 @@ for epoch in range(start_epoch, num_epochs):
     train_discriminator = False
 
     for i, (images, messages) in enumerate(train_loader):
-        images = get_noisy(images).half().to(device)
-        messages = messages.half().to(device)
+        images = get_noisy(images).to(device)
+        messages = messages.to(device)
 
         if noise_std > 0:
             noise = torch.randn_like(images) * noise_std
@@ -182,36 +185,36 @@ for epoch in range(start_epoch, num_epochs):
             images = torch.clamp(images, -1, 1)  # mantén en el rango [-1, 1]
 
         # Paso forward
+        adv_loss = F.mse_loss(torch.ones_like(torch.tensor([0.])), torch.ones_like(torch.tensor([0.])))  # 0
         with amp.autocast("cuda"):
             stego_images = encoder(images, messages)
             recovered_messages = decoder(stego_images)
 
+            # La perdida hay que calcularla si o si con amp.autocast para mantener la coherencia con float16
+            disc_real = discriminator(images)
+            disc_fake = discriminator(stego_images.detach())
+
+            disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
+                        F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
+
             # El discriminador NO se entrena todos los epochs
             if train_discriminator:
-                # Se sigue calculando la perdida dentro del grafo
-                disc_real = discriminator(images)
-                disc_fake = discriminator(stego_images.detach())
-
-                disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
-                            F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
-
                 disc_opt.zero_grad()
                 scaler.scale(disc_loss).backward()
                 scaler.step(disc_opt)
                 scaler.update()
 
                 if disc_loss.item() <= FREEZE_DISC_LOSS:
+                    print("🧠 [Discriminador]: Paro de entrenar")
                     train_discriminator = False  # Deja de entrenar
 
             else: # si no esta entrenando
-                 if epoch > WARM_UP_LEN and freeze_disc(global_step, epoch):
-                     train_discriminator = True  # Empieza a entrenar
+                if epoch > WARM_UP_LEN and freeze_disc(global_step, epoch):
+                    print("🧠 [Discriminador]: empiezo a entrenar")
+                    train_discriminator = True  # Empieza a entrenar
 
             # Encoder + Decoder
             disc_pred = discriminator(stego_images)
-            image_loss = (1 - ssim(stego_images, images, data_range=1.0, size_average=True)) + \
-                         image_loss_lambda * F.mse_loss(stego_images, images)
-
             message_loss = bce(recovered_messages, messages)
 
             # WarmUP
@@ -221,27 +224,22 @@ for epoch in range(start_epoch, num_epochs):
                 adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
                 total_loss = message_loss + adv_loss
 
+        enc_dec_opt.zero_grad()
+        scaler.scale(total_loss).backward()
+        scaler.step(enc_dec_opt)
+        scaler.update()
+
         with torch.no_grad():
             # Bit Accuracy
             pred_bits = (torch.sigmoid(recovered_messages) > 0.5).int()
             true_bits = messages.int().to(pred_bits.device)
             bit_accuracy = (pred_bits == true_bits).float().mean()
 
-            if not train_discriminator:
-                adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
-                disc_real = discriminator(images)
-                disc_fake = discriminator(stego_images.detach())
-
-                disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
-                            F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
-
-        enc_dec_opt.zero_grad()
-        scaler.scale(total_loss).backward()
-        scaler.step(enc_dec_opt)
-        scaler.update()
-
-        del total_loss, message_loss, adv_loss, stego_images, recovered_messages, disc_pred
-        torch.cuda.empty_cache()
+            # Image loss
+            images_32 = images.float()
+            stego_32 = stego_images.float()
+            image_loss = (1 - ssim(stego_32, images_32, data_range=1.0, size_average=True)) + \
+                         image_loss_lambda * F.mse_loss(stego_images, images)
 
         total_image_loss += image_loss.item()
         total_message_loss += message_loss.item()
@@ -250,6 +248,9 @@ for epoch in range(start_epoch, num_epochs):
         total_bit_accuracy += bit_accuracy.item()
         num_batches += 1
         global_step += 1
+
+        del total_loss, message_loss, adv_loss, stego_images, recovered_messages, disc_pred
+        torch.cuda.empty_cache()
 
         # Promedio por epoch
         avg_image_loss = total_image_loss / num_batches
