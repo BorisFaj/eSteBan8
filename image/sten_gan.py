@@ -309,20 +309,21 @@ for epoch in range(start_epoch, num_epochs):
     # Histogramas de pesos y gradientes
     for name, param in encoder.named_parameters():
         writer.add_histogram(f"Encoder/weights/{name}", param, global_step)
-        if param.grad is not None:
+        if param.grad is not None and param.grad.numel() > 0:
             writer.add_histogram(f"Encoder/grads/{name}", param.grad, global_step)
     for name, param in decoder.named_parameters():
         writer.add_histogram(f"Decoder/weights/{name}", param, global_step)
-        if param.grad is not None:
+        if param.grad is not None and param.grad.numel() > 0:
             writer.add_histogram(f"Decoder/grads/{name}", param.grad, global_step)
     for name, param in discriminator.named_parameters():
         writer.add_histogram(f"Discriminator/weights/{name}", param, global_step)
-        if param.grad is not None:
+        if param.grad is not None and param.grad.numel() > 0:
             writer.add_histogram(f"Discriminator/grads/{name}", param.grad, global_step)
 
     # Visualización de imágenes reales vs stego
     img_grid_real = make_grid(images[:8].cpu(), nrow=4, normalize=True)
-    img_grid_stego = make_grid(stego_images[:8].detach().cpu(), nrow=4, normalize=True)
+    stego_images_01 = (stego_images + 1) / 2
+    img_grid_stego = make_grid(stego_images_01[:8].detach().cpu(), nrow=4)
     writer.add_image("Images/Real", img_grid_real, epoch)
     writer.add_image("Images/Stego", img_grid_stego, epoch)
 
