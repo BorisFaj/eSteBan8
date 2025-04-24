@@ -10,3 +10,4 @@ nltk
 pytorch_msssim
 fiftyone
 python-dotenv
+mlflow
