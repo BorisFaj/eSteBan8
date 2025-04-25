@@ -11,6 +11,8 @@ from data_handler import DataHandler
 from dotenv import load_dotenv
 import os
 from start_experiment import start_mlflow, log_gpu_stats, log_model
+import random
+
 
 load_dotenv()
 
@@ -106,6 +108,7 @@ for epoch in range(num_epochs):
         scaler.scale(total).backward()
         scaler.step(optimizer)
         scaler.update()
+        log_gpu_stats(mlflow=mlflow, epoch=epoch)  # lo pongo aqui que es cuando consume
 
         total_loss += image_loss.item()
         total_edge_loss += _edge_loss.item()
@@ -125,20 +128,25 @@ for epoch in range(num_epochs):
     mlflow.log_metric("train_message_loss", msg_loss.item(), step=epoch)
     mlflow.log_metric("train_image_loss", avg_loss, step=epoch)
     mlflow.log_metric("train_style_loss", avg_style, step=epoch)
-    log_gpu_stats(mlflow, epoch)
 
     # Validacion cada EPOCHS_TO_VAL epochs
     if (epoch + 1) % EPOCHS_TO_VAL == 0:
         encoder.eval()
         with torch.no_grad():
-            img = images[0:1].repeat(2, 1, 1, 1)
-            msg1 = torch.randn(1, message_size).to(device)
-            msg2 = torch.randn(1, message_size).to(device)
-            msg = torch.cat([msg1, msg2], dim=0)
+            val_dataset = val_loader.dataset
+            idx1, idx2 = random.sample(range(len(val_dataset)), 2)
+            img1, _ = val_dataset[idx1]
+            img2, _ = val_dataset[idx2]
+
+            img = torch.stack([img1, img2], dim=0).to(device)
+            msg = torch.randn(2, message_size).to(device)
+            msg = msg / msg.norm(dim=1, keepdim=True)
 
             stego = encoder(img.to(device), msg)
             diff = (stego[0] - stego[1]).abs().mean().item()
+            diff_map = ((stego_imgs[:1] - test_imgs[:1]) ** 2).mean(dim=1, keepdim=True)  # [B, 1, H, W]
 
+            writer.add_image("Debug/DiffMap", diff_map[0], epoch)
             writer.add_scalar("Debug/StegoMsgDiff", diff, epoch)
             mlflow.log_metric("stego_msg_diff", diff, step=epoch)
 
@@ -147,8 +155,7 @@ for epoch in range(num_epochs):
             val_batches = 0
             val_msg_loss = 0
             for val_imgs, val_msgs in val_loader:
-                val_imgs = val_imgs.to(device).to(torch.float32)
-                val_msgs = val_msgs.to(device).to(torch.float32)
+                val_imgs = val_imgs.to(device)
                 val_stego = encoder(val_imgs, val_msgs)
 
                 _img_loss = (1 - ssim((val_stego + 1) / 2, (val_imgs + 1) / 2, data_range=1.0, size_average=True)) + \
@@ -156,7 +163,7 @@ for epoch in range(num_epochs):
 
                 val_decoded_msg = decoder(val_stego)
 
-                val_msg_loss += F.mse_loss(val_decoded_msg, val_msgs)
+                val_msg_loss += F.mse_loss(val_decoded_msg, val_msgs).item()
                 val_img_loss += _img_loss.item()
                 val_batches += 1
 
@@ -170,7 +177,7 @@ for epoch in range(num_epochs):
 
             # Logs
             test_imgs, test_msgs = next(iter(val_loader))
-            test_imgs = test_imgs.to(device).to(torch.float32)
+            test_imgs = test_imgs.to(device)
             test_msgs = test_msgs.to(device).to(torch.float32)
             stego_imgs = encoder(test_imgs, test_msgs)
             img_real = make_grid((test_imgs[:8] + 1) / 2, nrow=4).cpu()

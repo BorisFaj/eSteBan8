@@ -1,4 +1,5 @@
 import os
+import torch
 import mlflow
 import mlflow.pytorch
 from dotenv import load_dotenv
@@ -30,6 +31,8 @@ def start_mlflow(params: dict, run_name: str):
     return mlflow
 
 def get_gpu_stats():
+    torch.cuda.synchronize()  # Espera que el trabajo termine antes de medir
+
     mem_info = nvmlDeviceGetMemoryInfo(_handle)
     util = nvmlDeviceGetUtilizationRates(_handle)
     return {
