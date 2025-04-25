@@ -2,13 +2,23 @@ import torch
 import torch.nn.functional as F
 from torchvision.models import vgg19
 from torch import nn
+from torchvision.models import VGG19_Weights
+
+def edge_loss(x, y):
+    laplace_kernel = torch.tensor([[0, 1, 0],
+                                   [1, -4, 1],
+                                   [0, 1, 0]], dtype=torch.float32, device=x.device).view(1, 1, 3, 3)
+    laplace_kernel = laplace_kernel.repeat(x.size(1), 1, 1, 1)  # repetir por canal
+    x_edges = F.conv2d(x, laplace_kernel, padding=1, groups=x.size(1))
+    y_edges = F.conv2d(y, laplace_kernel, padding=1, groups=x.size(1))
+    return F.l1_loss(x_edges, y_edges)
 
 
 class StyleLossHelper(nn.Module):
     def __init__(self, device):
         super().__init__()
         # Cargamos VGG19 preentrenado
-        vgg = vgg19(pretrained=True).features[:16].eval().to(device)  # hasta conv3_3
+        vgg = vgg19(weights=VGG19_Weights.DEFAULT).features[:16].to(device)  # hasta conv3_3
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
