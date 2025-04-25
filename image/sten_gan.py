@@ -200,7 +200,6 @@ for epoch in range(start_epoch, num_epochs):
     num_batches = 0
     total_bit_accuracy = 0
     train_discriminator = False
-    style_loss_helper = StyleLossHelper(device)
 
     for i, (images, messages) in enumerate(train_loader):
         images = get_noisy(images).to(device)
@@ -254,20 +253,13 @@ for epoch in range(start_epoch, num_epochs):
 
             # WarmUP
             if epoch >= WARM_UP_LEN and train_discriminator:
-                # Denormalizar imágenes para SSIM (de [-1,1] → [0,1])
-                images_01 = (images + 1) / 2
-                stego_images_01 = (stego_images + 1) / 2
-
-                style_loss = style_loss_helper(images_01, stego_images_01)
-                total_loss += style_loss_weight * style_loss
-
                 adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
                 total_loss += adv_loss
 
-        enc_dec_opt.zero_grad()
-        scaler.scale(total_loss).backward()
-        scaler.step(enc_dec_opt)
-        scaler.update()
+            enc_dec_opt.zero_grad()
+            scaler.scale(total_loss).backward()
+            scaler.step(enc_dec_opt)
+            scaler.update()
 
         with torch.no_grad():
             # Bit Accuracy
