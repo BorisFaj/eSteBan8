@@ -2,6 +2,7 @@ import os
 import random
 import torch
 import torch.nn as nn
+import evaluate
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer
 from datasets import load_dataset
@@ -10,8 +11,6 @@ from nltk.translate.bleu_score import sentence_bleu
 from nltk.translate.bleu_score import SmoothingFunction
 from text_coder import TextCompressorVAE
 from text_decoder import TextDecoder
-import evaluate
-
 
 smoother = SmoothingFunction().method1
 
@@ -23,7 +22,7 @@ EMBED_DIM = 128
 HIDDEN_DIM = LATENT_DIM
 MAX_LEN = 60
 EPOCHS = 3000
-RUN_NAME = "eSteBert_v1.2s"
+RUN_NAME = "eSteBert_v1.3s"
 
 log_dir = f'./runs/{RUN_NAME}'
 checkpoint_dir = f'./checkpoints/{RUN_NAME}'
@@ -162,6 +161,6 @@ for epoch in range(EPOCHS):
         torch.save(decoder.state_dict(), os.path.join(checkpoint_dir, f"decoder_epoch{epoch+1}.pt"))
 
 # --- Guardado final ---
-torch.save(compressor.state_dict(), "./compressor.pt")
-torch.save(decoder.state_dict(), "./decoder.pt")
+torch.save(compressor.state_dict(), os.path.join(checkpoint_dir, f"compressor_epoch{epoch + 1}.pt"))
+torch.save(decoder.state_dict(), os.path.join(checkpoint_dir, f"decoder_epoch{epoch + 1}.pt"))
 writer.close()
