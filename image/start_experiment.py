@@ -33,9 +33,9 @@ def get_gpu_stats():
     mem_info = nvmlDeviceGetMemoryInfo(_handle)
     util = nvmlDeviceGetUtilizationRates(_handle)
     return {
-        "gpu_memory_used_mb": mem_info.used // 1024 ** 2,
-        "gpu_memory_total_mb": mem_info.total // 1024 ** 2,
-        "gpu_utilization_percent": util.gpu
+        "sys/gpu_memory_used_mb": mem_info.used // 1024 ** 2,
+        "sys/gpu_memory_total_mb": mem_info.total // 1024 ** 2,
+        "sys/gpu_utilization_percent": util.gpu
     }
 
 def log_gpu_stats(mlflow, epoch):

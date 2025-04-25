@@ -22,8 +22,10 @@ num_epochs = int(os.getenv("num_epochs"))
 image_loss_lambda = float(os.getenv("image_loss_lambda"))
 noise_std = float(os.getenv("noise_std"))
 style_loss_weight = float(os.getenv("style_loss_weight"))
-RUN_NAME = os.getenv("RUN_NAME")
-log_dir = os.path.join(os.getenv("log_dir"), f"{RUN_NAME}_autoencoder")
+RUN_NAME = os.getenv("RUN_NAME") + "_autoencoder"
+EPOCHS_TO_VAL = int(os.getenv("EPOCHS_TO_VAL"))  # numero de epochs entre validaciones
+EPOCHS_TO_SAVE = int(os.getenv("EPOCHS_TO_SAVE"))  # numero de epochs para guardar el modelo
+log_dir = os.path.join(os.getenv("log_dir"), f"{RUN_NAME}")
 os.makedirs(log_dir, exist_ok=True)
 
 # Cuda y precision
@@ -53,7 +55,7 @@ mlflow = start_mlflow(params={
         "image_loss_lambda": image_loss_lambda,
         "noise_std": noise_std,
         "style_loss_weight": style_loss_weight
-    }, run_name="SteGAuto")
+    }, run_name=RUN_NAME)
 
 for epoch in range(num_epochs):
     encoder.train()
@@ -121,20 +123,18 @@ for epoch in range(num_epochs):
     mlflow.log_metric("train_image_loss", avg_loss, step=epoch)
     mlflow.log_metric("train_style_loss", avg_style, step=epoch)
     log_gpu_stats(mlflow, epoch)
-    log_model(mlflow, encoder)
 
-    # Validación cada 4 épocas
-    if epoch % 4 == 0:
+    if epoch > 1 and epoch % EPOCHS_TO_VAL == 0:
         encoder.eval()
         with torch.no_grad():
             val_loss = 0
             val_batches = 0
             for val_imgs, val_msgs in val_loader:
-                val_imgs = val_imgs.to(device)
-                val_msgs = val_msgs.to(device)
+                val_imgs = val_imgs.to(device).to(torch.float32)
+                val_msgs = val_msgs.to(device).to(torch.float32)
                 val_stego = encoder(val_imgs, val_msgs)
 
-                v_loss = (1 - ssim((val_stego + 1)/2, (val_imgs + 1)/2, data_range=1.0, size_average=True)) + \
+                v_loss = (1 - ssim((val_stego + 1) / 2, (val_imgs + 1) / 2, data_range=1.0, size_average=True)) + \
                          image_loss_lambda * F.mse_loss(val_stego, val_imgs)
                 val_loss += v_loss.item()
                 val_batches += 1
@@ -144,19 +144,18 @@ for epoch in range(num_epochs):
             writer.add_scalar("Loss/Val_Image", avg_val_loss, epoch)
             mlflow.log_metric("val_image_loss", avg_val_loss, step=epoch)
 
-    if epoch % 5 == 0:
-        encoder.eval()
-        with torch.no_grad():
+            # Logs
             test_imgs, test_msgs = next(iter(val_loader))
-            test_imgs = test_imgs.to(device)
-            test_msgs = test_msgs.to(device)
+            test_imgs = test_imgs.to(device).to(torch.float32)
+            test_msgs = test_msgs.to(device).to(torch.float32)
             stego_imgs = encoder(test_imgs, test_msgs)
             img_real = make_grid((test_imgs[:8] + 1) / 2, nrow=4).cpu()
             img_stego = make_grid((stego_imgs[:8] + 1) / 2, nrow=4).cpu()
             writer.add_image("Autoencoder/Real", img_real, epoch)
             writer.add_image("Autoencoder/Stego", img_stego, epoch)
 
-mlflow.pytorch.log_model(encoder, "encoder_model")
+    if epoch % EPOCHS_TO_SAVE == 0:
+        log_model(mlflow, encoder)
 
 writer.close()
 mlflow.end_run()
