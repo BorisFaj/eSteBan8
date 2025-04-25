@@ -192,6 +192,8 @@ bce = nn.BCEWithLogitsLoss()
 
 global_step = 0
 start_epoch = load_latest_checkpoint(checkpoint_dir, RUN_NAME, encoder, decoder, discriminator)
+
+# Empieza la marcha
 for epoch in range(start_epoch, num_epochs):
     total_image_loss = 0
     total_message_loss = 0
@@ -210,8 +212,9 @@ for epoch in range(start_epoch, num_epochs):
             images = images + noise
             images = torch.clamp(images, -1, 1)  # mantén en el rango [-1, 1]
 
-        # Paso forward
         adv_loss = F.mse_loss(torch.ones_like(torch.tensor([0.])), torch.ones_like(torch.tensor([0.])))  # 0
+
+        # Forward encoder
         with amp.autocast("cuda"):
             stego_images = encoder(images, messages)
             recovered_messages = decoder(stego_images)
@@ -307,6 +310,7 @@ for epoch in range(start_epoch, num_epochs):
     writer.add_scalar("Loss/Discriminator", avg_disc_loss, epoch)
     writer.add_scalar("Loss/Adversarial", avg_adv_loss, epoch)
     writer.add_scalar("Accuracy/Bit", avg_bit_accuracy, epoch)
+
     # Histogramas de pesos y gradientes
     for name, param in encoder.named_parameters():
         writer.add_histogram(f"Encoder/weights/{name}", param, global_step)
@@ -341,7 +345,7 @@ for epoch in range(start_epoch, num_epochs):
 
         mlflow.log_artifact(os.path.join(checkpoint_dir, f"encoder_epoch{epoch + 1}.pt"))
 
-        print(f"Modelos guardados en epoch MLFlow")
-
+        print(f"Modelos guardados en MLFlow")
 
 mlflow.end_run()
+writer.close()

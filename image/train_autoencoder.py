@@ -127,7 +127,8 @@ for epoch in range(num_epochs):
     mlflow.log_metric("train_style_loss", avg_style, step=epoch)
     log_gpu_stats(mlflow, epoch)
 
-    if epoch > 1 and epoch % EPOCHS_TO_VAL == 0:
+    # Validacion cada EPOCHS_TO_VAL epochs
+    if (epoch + 1) % EPOCHS_TO_VAL == 0:
         encoder.eval()
         with torch.no_grad():
             img = images[0:1].repeat(2, 1, 1, 1)
@@ -177,7 +178,7 @@ for epoch in range(num_epochs):
             writer.add_image("Autoencoder/Real", img_real, epoch)
             writer.add_image("Autoencoder/Stego", img_stego, epoch)
 
-    if epoch % EPOCHS_TO_SAVE == 0:
+    if (epoch + 1) % EPOCHS_TO_SAVE == 0:
         log_model(mlflow, encoder)
 
 writer.close()
