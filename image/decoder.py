@@ -1,6 +1,6 @@
 import torch.nn as nn
-import torch
 import torch.nn.init as init
+
 
 class Decoder(nn.Module):
     def __init__(self, image_channels, message_size):
@@ -13,10 +13,10 @@ class Decoder(nn.Module):
         self.relu2 = nn.ReLU()
         self.norm2 = nn.GroupNorm(8, 64)
 
+        self.pool = nn.AdaptiveAvgPool2d((8, 8))  # Reducción razonable
         self.message_size = message_size
-        self._fc_initialized = False  # Flag para inicialización diferida
+        self._fc_initialized = False
 
-        # Inicialización explícita de las convoluciones
         for layer in [self.conv1, self.conv2]:
             init.kaiming_uniform_(layer.weight, nonlinearity='relu')
             if layer.bias is not None:
@@ -28,12 +28,12 @@ class Decoder(nn.Module):
         x = self.relu2(self.conv2(x))
         x = self.norm2(x)
 
-        # Skip connection: si las dimensiones coinciden, suma
         if stego_image.shape == x.shape:
             x = x + stego_image
 
+        x = self.pool(x)  # B x 64 x 8 x 8
         B, C, H, W = x.shape
-        x = x.view(B, -1)
+        x = x.view(B, -1)  # B x 4096
 
         if not self._fc_initialized:
             self.fc = nn.Linear(C * H * W, self.message_size).to(x.device)
@@ -43,5 +43,4 @@ class Decoder(nn.Module):
             self.add_module("fc", self.fc)
             print("🧠 Decoder creado")
 
-        x = self.fc(x)
-        return x
+        return self.fc(x)

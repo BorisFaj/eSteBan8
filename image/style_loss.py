@@ -4,6 +4,15 @@ from torchvision.models import vgg19
 from torch import nn
 from torchvision.models import VGG19_Weights
 
+def edge_loss(x, y):
+    laplace_kernel = torch.tensor([[0, 1, 0],
+                                   [1, -4, 1],
+                                   [0, 1, 0]], dtype=torch.float32, device=x.device).view(1, 1, 3, 3)
+    laplace_kernel = laplace_kernel.repeat(x.size(1), 1, 1, 1)  # repetir por canal
+    x_edges = F.conv2d(x, laplace_kernel, padding=1, groups=x.size(1))
+    y_edges = F.conv2d(y, laplace_kernel, padding=1, groups=x.size(1))
+    return F.l1_loss(x_edges, y_edges)
+
 
 class StyleLossHelper(nn.Module):
     def __init__(self, device):

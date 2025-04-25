@@ -5,7 +5,8 @@ from torchvision.utils import make_grid
 from pytorch_msssim import ssim
 from torch import amp
 from encoder import Encoder
-from style_loss import StyleLossHelper
+from decoder import Decoder
+from style_loss import edge_loss
 from data_handler import DataHandler
 from dotenv import load_dotenv
 import os
@@ -22,6 +23,7 @@ num_epochs = int(os.getenv("num_epochs"))
 image_loss_lambda = float(os.getenv("image_loss_lambda"))
 noise_std = float(os.getenv("noise_std"))
 style_loss_weight = float(os.getenv("style_loss_weight"))
+message_weight = float(os.getenv("message_weight"))
 RUN_NAME = os.getenv("RUN_NAME") + "_autoencoder"
 EPOCHS_TO_VAL = int(os.getenv("EPOCHS_TO_VAL"))  # numero de epochs entre validaciones
 EPOCHS_TO_SAVE = int(os.getenv("EPOCHS_TO_SAVE"))  # numero de epochs para guardar el modelo
@@ -39,8 +41,8 @@ writer = SummaryWriter(log_dir)
 
 # Modelos
 encoder = Encoder(image_channels=image_channels, message_size=message_size, image_size=image_size).to(dtype=torch.float32).to(device)
+decoder = Decoder(image_channels=image_channels, message_size=message_size).to(dtype=torch.float32).to(device)
 optimizer = torch.optim.Adam(encoder.parameters(), lr=1e-4)
-style_loss_helper = StyleLossHelper(device)
 
 # Datos
 train_dataset, train_loader, val_dataset, val_loader = DataHandler(batch_size=batch_size).get()
@@ -60,7 +62,7 @@ mlflow = start_mlflow(params={
 for epoch in range(num_epochs):
     encoder.train()
     total_loss = 0
-    total_style_loss = 0
+    total_edge_loss = 0
     total_batches = 0
 
     for images, messages in train_loader:
@@ -76,15 +78,13 @@ for epoch in range(num_epochs):
             stego_images = encoder(images, messages)
             image_loss = (1 - ssim((stego_images + 1)/2, (images + 1)/2, data_range=1.0, size_average=True)) + \
                          image_loss_lambda * F.mse_loss(stego_images, images)
-            try:
-                style_loss = style_loss_helper((images + 1) / 2, (stego_images + 1) / 2)
-                if torch.isnan(style_loss):
-                    raise ValueError("NaN in style_loss")
-            except Exception as e:
-                print(f"❌ style_loss error: {e}")
-                continue
 
-            total = image_loss + style_loss_weight * style_loss
+            decoded_msg = decoder(stego_images.detach())
+            msg_loss = F.mse_loss(decoded_msg, messages)
+
+            _edge_loss = edge_loss((stego_images + 1) / 2, (images + 1) / 2)
+            total = image_loss + message_weight * msg_loss + style_loss_weight * _edge_loss
+
 
         if not torch.all(torch.isfinite(images)):
             print("🚨 imágenes corruptas")
@@ -93,21 +93,22 @@ for epoch in range(num_epochs):
 
         if torch.isnan(image_loss):
             print("⚠️ image_loss is NaN")
-        if torch.isnan(style_loss):
+        if torch.isnan(_edge_loss):
             print("⚠️ style_loss is NaN")
         if torch.isnan(total):
             print("❌ NaN detected in total loss. Skipping batch.")
-            print(f"image_loss: {image_loss.item()}, style_loss: {style_loss.item()}")
+            print(f"image_loss: {image_loss.item()}, edge_loss: {_edge_loss.item()}")
 
             continue
 
+        torch.cuda.empty_cache()
         optimizer.zero_grad()
         scaler.scale(total).backward()
         scaler.step(optimizer)
         scaler.update()
 
         total_loss += image_loss.item()
-        total_style_loss += style_loss.item()
+        total_edge_loss += _edge_loss.item()
         total_batches += 1
 
     if total_batches == 0:
@@ -115,11 +116,13 @@ for epoch in range(num_epochs):
         break
 
     avg_loss = total_loss / total_batches
-    avg_style = total_style_loss / total_batches
+    avg_style = total_edge_loss / total_batches
 
     print(f"Epoch {epoch + 1}/{num_epochs}, Image Loss: {avg_loss:.4f}, Style Loss: {avg_style:.4f}")
     writer.add_scalar("Loss/Image", avg_loss, epoch)
     writer.add_scalar("Loss/Style", avg_style, epoch)
+    writer.add_scalar("Loss/Message", msg_loss.item(), epoch)
+    mlflow.log_metric("train_message_loss", msg_loss.item(), step=epoch)
     mlflow.log_metric("train_image_loss", avg_loss, step=epoch)
     mlflow.log_metric("train_style_loss", avg_style, step=epoch)
     log_gpu_stats(mlflow, epoch)
@@ -127,22 +130,42 @@ for epoch in range(num_epochs):
     if epoch > 1 and epoch % EPOCHS_TO_VAL == 0:
         encoder.eval()
         with torch.no_grad():
-            val_loss = 0
+            img = images[0:1].repeat(2, 1, 1, 1)
+            msg1 = torch.randn(1, message_size).to(device)
+            msg2 = torch.randn(1, message_size).to(device)
+            msg = torch.cat([msg1, msg2], dim=0)
+
+            stego = encoder(img.to(device), msg)
+            diff = (stego[0] - stego[1]).abs().mean().item()
+
+            writer.add_scalar("Debug/StegoMsgDiff", diff, epoch)
+            mlflow.log_metric("stego_msg_diff", diff, step=epoch)
+
+        with torch.no_grad():
+            val_img_loss = 0
             val_batches = 0
+            val_msg_loss = 0
             for val_imgs, val_msgs in val_loader:
                 val_imgs = val_imgs.to(device).to(torch.float32)
                 val_msgs = val_msgs.to(device).to(torch.float32)
                 val_stego = encoder(val_imgs, val_msgs)
 
-                v_loss = (1 - ssim((val_stego + 1) / 2, (val_imgs + 1) / 2, data_range=1.0, size_average=True)) + \
-                         image_loss_lambda * F.mse_loss(val_stego, val_imgs)
-                val_loss += v_loss.item()
+                _img_loss = (1 - ssim((val_stego + 1) / 2, (val_imgs + 1) / 2, data_range=1.0, size_average=True)) + \
+                            image_loss_lambda * F.mse_loss(val_stego, val_imgs)
+
+                val_decoded_msg = decoder(val_stego)
+
+                val_msg_loss += F.mse_loss(val_decoded_msg, val_msgs)
+                val_img_loss += _img_loss.item()
                 val_batches += 1
 
-            avg_val_loss = val_loss / val_batches
-            print(f"\tValidation Image Loss: {avg_val_loss:.4f}")
-            writer.add_scalar("Loss/Val_Image", avg_val_loss, epoch)
-            mlflow.log_metric("val_image_loss", avg_val_loss, step=epoch)
+            avg_img_loss = val_img_loss / val_batches
+            avg_msg_loss = val_msg_loss / val_batches
+            print(f"\tValidation Image Loss: {avg_img_loss:.4f}")
+            writer.add_scalar("Val/Loss/Val_Image", avg_img_loss, epoch)
+            writer.add_scalar("Val/Loss/Message", avg_msg_loss, epoch)
+            mlflow.log_metric("val_message_loss", avg_msg_loss, step=epoch)
+            mlflow.log_metric("val_image_loss", avg_img_loss, step=epoch)
 
             # Logs
             test_imgs, test_msgs = next(iter(val_loader))
