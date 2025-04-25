@@ -38,6 +38,7 @@ IMAGE_INPUT_RES = int(os.getenv("IMAGE_INPUT_RES"))  # resolucion de la imagen d
 EPOCHS_TO_VAL = int(os.getenv("EPOCHS_TO_VAL"))  # numero de epochs entre validaciones
 EPOCHS_TO_SAVE = int(os.getenv("EPOCHS_TO_SAVE"))  # numero de epochs para guardar el modelo
 noise_std = float(os.getenv("noise_std"))  # ruido que se le mete a la imagen generada. Entre 0.01 y 0.05 es razonable para imágenes normalizadas
+style_loss_weight = float(os.getenv("style_loss_weight"))
 RUN_NAME = os.getenv("RUN_NAME")
 
 # Checkpoints
@@ -120,7 +121,7 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
 
         mlflow.log_metric("Test/Loss/Image", avg_image_loss, step=epoch)
         mlflow.log_metric("Test/Loss/Message", avg_message_loss, step=epoch)
-        mlflow.log_metric("Test/Loss/Adversarial", avg_style_loss, step=epoch)
+        mlflow.log_metric("Test/Loss/Style", avg_style_loss, step=epoch)
         mlflow.log_metric("Test/Accuracy/Bit", avg_bit_accuracy, step=epoch)
 
         writer.add_scalar("Test/Loss/Message", avg_message_loss, epoch)
@@ -242,29 +243,29 @@ for epoch in range(start_epoch, num_epochs):
             disc_pred = discriminator(stego_images)
             message_loss = bce(recovered_messages, messages)
 
-            # WarmUP
-            if epoch < WARM_UP_LEN or not train_discriminator:
-                total_loss = message_loss # Si no entrena discriminador, tampoco entra en el total_loss
-            else:
-                adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
-                total_loss = message_loss + adv_loss
+            # Perdidas
+            images_32 = images.float()
+            stego_32 = stego_images.float()
+            image_loss = (1 - ssim(stego_32, images_32, data_range=1.0, size_average=True)) + \
+                         image_loss_lambda * F.mse_loss(stego_images, images)
 
-        enc_dec_opt.zero_grad()
-        scaler.scale(total_loss).backward()
-        scaler.step(enc_dec_opt)
-        scaler.update()
+            total_loss = message_loss + image_loss_lambda * image_loss
+
+            # WarmUP
+            if epoch >= WARM_UP_LEN and train_discriminator:
+                adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
+                total_loss += adv_loss
+
+            enc_dec_opt.zero_grad()
+            scaler.scale(total_loss).backward()
+            scaler.step(enc_dec_opt)
+            scaler.update()
 
         with torch.no_grad():
             # Bit Accuracy
             pred_bits = (torch.sigmoid(recovered_messages) > 0.5).int()
             true_bits = messages.int().to(pred_bits.device)
             bit_accuracy = (pred_bits == true_bits).float().mean()
-
-            # Image loss
-            images_32 = images.float()
-            stego_32 = stego_images.float()
-            image_loss = (1 - ssim(stego_32, images_32, data_range=1.0, size_average=True)) + \
-                         image_loss_lambda * F.mse_loss(stego_images, images)
 
         total_image_loss += image_loss.item()
         total_message_loss += message_loss.item()
