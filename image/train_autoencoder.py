@@ -9,7 +9,7 @@ from style_loss import StyleLossHelper
 from data_handler import DataHandler
 from dotenv import load_dotenv
 import os
-from start_experiment import start_mlflow
+from start_experiment import start_mlflow, log_gpu_stats, log_model
 
 load_dotenv()
 
@@ -36,7 +36,7 @@ scaler = amp.GradScaler()
 writer = SummaryWriter(log_dir)
 
 # Modelos
-encoder = Encoder(image_channels=image_channels, message_size=message_size, image_size=image_size).to(device)
+encoder = Encoder(image_channels=image_channels, message_size=message_size, image_size=image_size).to(dtype=torch.float32).to(device)
 optimizer = torch.optim.Adam(encoder.parameters(), lr=1e-4)
 style_loss_helper = StyleLossHelper(device)
 
@@ -53,8 +53,7 @@ mlflow = start_mlflow(params={
         "image_loss_lambda": image_loss_lambda,
         "noise_std": noise_std,
         "style_loss_weight": style_loss_weight
-    } , run_name="SteGAuto")
-
+    }, run_name="SteGAuto")
 
 for epoch in range(num_epochs):
     encoder.train()
@@ -69,13 +68,36 @@ for epoch in range(num_epochs):
         if noise_std > 0:
             noise = torch.randn_like(images) * noise_std
             images = torch.clamp(images + noise, -1, 1)
+            assert torch.all(torch.isfinite(images)), "❌ Imagen con NaN o Inf antes del encoder"
 
-        with amp.autocast("cuda"):
+        with amp.autocast("cuda", dtype=torch.float32):
             stego_images = encoder(images, messages)
             image_loss = (1 - ssim((stego_images + 1)/2, (images + 1)/2, data_range=1.0, size_average=True)) + \
                          image_loss_lambda * F.mse_loss(stego_images, images)
-            style_loss = style_loss_helper((images + 1)/2, (stego_images + 1)/2)
+            try:
+                style_loss = style_loss_helper((images + 1) / 2, (stego_images + 1) / 2)
+                if torch.isnan(style_loss):
+                    raise ValueError("NaN in style_loss")
+            except Exception as e:
+                print(f"❌ style_loss error: {e}")
+                continue
+
             total = image_loss + style_loss_weight * style_loss
+
+        if not torch.all(torch.isfinite(images)):
+            print("🚨 imágenes corruptas")
+        if not torch.all(torch.isfinite(stego_images)):
+            print("🚨 stego corrupto")
+
+        if torch.isnan(image_loss):
+            print("⚠️ image_loss is NaN")
+        if torch.isnan(style_loss):
+            print("⚠️ style_loss is NaN")
+        if torch.isnan(total):
+            print("❌ NaN detected in total loss. Skipping batch.")
+            print(f"image_loss: {image_loss.item()}, style_loss: {style_loss.item()}")
+
+            continue
 
         optimizer.zero_grad()
         scaler.scale(total).backward()
@@ -86,6 +108,10 @@ for epoch in range(num_epochs):
         total_style_loss += style_loss.item()
         total_batches += 1
 
+    if total_batches == 0:
+        print("⚠️ No batches processed due to NaNs. Stopping training.")
+        break
+
     avg_loss = total_loss / total_batches
     avg_style = total_style_loss / total_batches
 
@@ -94,6 +120,8 @@ for epoch in range(num_epochs):
     writer.add_scalar("Loss/Style", avg_style, epoch)
     mlflow.log_metric("train_image_loss", avg_loss, step=epoch)
     mlflow.log_metric("train_style_loss", avg_style, step=epoch)
+    log_gpu_stats(mlflow, epoch)
+    log_model(mlflow, encoder)
 
     # Validación cada 4 épocas
     if epoch % 4 == 0:

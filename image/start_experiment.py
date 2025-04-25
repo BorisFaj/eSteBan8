@@ -1,7 +1,11 @@
-import mlflow
-from dotenv import load_dotenv
 import os
+import mlflow
+import mlflow.pytorch
+from dotenv import load_dotenv
+from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo, nvmlDeviceGetUtilizationRates
 
+nvmlInit()
+_handle = nvmlDeviceGetHandleByIndex(0)
 
 def start_mlflow(params: dict, run_name: str):
     load_dotenv()
@@ -24,3 +28,19 @@ def start_mlflow(params: dict, run_name: str):
     mlflow.log_params(params)
 
     return mlflow
+
+def get_gpu_stats():
+    mem_info = nvmlDeviceGetMemoryInfo(_handle)
+    util = nvmlDeviceGetUtilizationRates(_handle)
+    return {
+        "gpu_memory_used_mb": mem_info.used // 1024 ** 2,
+        "gpu_memory_total_mb": mem_info.total // 1024 ** 2,
+        "gpu_utilization_percent": util.gpu
+    }
+
+def log_gpu_stats(mlflow, epoch):
+    for k, v in get_gpu_stats().items():
+        mlflow.log_metric(k, v, step=epoch)
+
+def log_model(mlflow, model):
+    mlflow.pytorch.log_model(model, os.getenv("EXPERIMENT_NAME"))

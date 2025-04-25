@@ -2,13 +2,14 @@ import torch
 import torch.nn.functional as F
 from torchvision.models import vgg19
 from torch import nn
+from torchvision.models import VGG19_Weights
 
 
 class StyleLossHelper(nn.Module):
     def __init__(self, device):
         super().__init__()
         # Cargamos VGG19 preentrenado
-        vgg = vgg19(pretrained=True).features[:16].eval().to(device)  # hasta conv3_3
+        vgg = vgg19(weights=VGG19_Weights.DEFAULT).features[:16].to(device)  # hasta conv3_3
         for param in vgg.parameters():
             param.requires_grad = False
         self.vgg = vgg
