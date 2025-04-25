@@ -103,7 +103,6 @@ for epoch in range(num_epochs):
 
             continue
 
-        torch.cuda.empty_cache()
         optimizer.zero_grad()
         scaler.scale(total).backward()
         scaler.step(optimizer)
@@ -113,6 +112,8 @@ for epoch in range(num_epochs):
         total_loss += image_loss.item()
         total_edge_loss += _edge_loss.item()
         total_batches += 1
+
+    torch.cuda.empty_cache()
 
     if total_batches == 0:
         print("⚠️ No batches processed due to NaNs. Stopping training.")
