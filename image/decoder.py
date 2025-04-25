@@ -7,11 +7,11 @@ class Decoder(nn.Module):
         super().__init__()
         self.conv1 = nn.Conv2d(image_channels, 32, kernel_size=3, padding=1)
         self.relu1 = nn.ReLU()
-        self.norm1 = nn.LayerNorm([32, 32, 32])
+        self.norm1 = nn.GroupNorm(4, 32)
 
         self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
         self.relu2 = nn.ReLU()
-        self.norm2 = nn.LayerNorm([64, 32, 32])
+        self.norm2 = nn.GroupNorm(8, 64)
 
         self.message_size = message_size
         self._fc_initialized = False  # Flag para inicialización diferida
@@ -36,7 +36,7 @@ class Decoder(nn.Module):
         x = x.view(B, -1)
 
         if not self._fc_initialized:
-            self.fc = nn.Linear(C * H * W, self.message_size).to(x.device).half()
+            self.fc = nn.Linear(C * H * W, self.message_size).to(x.device)
             init.kaiming_uniform_(self.fc.weight, nonlinearity='linear')
             nn.init.constant_(self.fc.bias, 0)
             self._fc_initialized = True
