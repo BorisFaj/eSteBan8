@@ -1,46 +1,69 @@
+import torch
 import torch.nn as nn
 import torch.nn.init as init
-
 
 class Decoder(nn.Module):
     def __init__(self, image_channels, message_size):
         super().__init__()
-        self.conv1 = nn.Conv2d(image_channels, 32, kernel_size=3, padding=1)
-        self.relu1 = nn.ReLU()
-        self.norm1 = nn.GroupNorm(4, 32)
-
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.relu2 = nn.ReLU()
-        self.norm2 = nn.GroupNorm(8, 64)
-
-        self.pool = nn.AdaptiveAvgPool2d((8, 8))  # Reducción razonable
         self.message_size = message_size
-        self._fc_initialized = False
 
-        for layer in [self.conv1, self.conv2]:
-            init.kaiming_uniform_(layer.weight, nonlinearity='relu')
-            if layer.bias is not None:
-                nn.init.constant_(layer.bias, 0)
+        self.conv1 = nn.Conv2d(image_channels, 64, 3, padding=1)
+        self.norm1 = nn.GroupNorm(8, 64)
+        self.act1 = nn.LeakyReLU(0.2)
 
-    def forward(self, stego_image):
-        x = self.relu1(self.conv1(stego_image))
+        self.conv2 = nn.Conv2d(64, 64, 3, padding=1)
+        self.norm2 = nn.GroupNorm(8, 64)
+        self.act2 = nn.LeakyReLU(0.2)
+
+        self.conv3 = nn.Conv2d(64, 32, 3, padding=1)
+        self.norm3 = nn.GroupNorm(4, 32)
+        self.act3 = nn.LeakyReLU(0.2)
+
+        self.conv4 = nn.Conv2d(32, 32, 3, padding=1)
+        self.norm4 = nn.GroupNorm(4, 32)
+        self.act4 = nn.LeakyReLU(0.2)
+
+        self.pool = nn.AdaptiveAvgPool2d((4, 4))  # Reducimos pero no matamos el espacio entero
+        self.fc = nn.Linear(32 * 4 * 4, message_size)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        for m in self.modules():
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
+                init.kaiming_normal_(m.weight, nonlinearity='leaky_relu')
+                if m.bias is not None:
+                    init.constant_(m.bias, 0)
+
+    def forward(self, x):
+        # Primer bloque
+        skip = x
+        x = self.conv1(x)
         x = self.norm1(x)
-        x = self.relu2(self.conv2(x))
+        x = self.act1(x)
+
+        x = self.conv2(x)
         x = self.norm2(x)
+        x = self.act2(x)
 
-        if stego_image.shape == x.shape:
-            x = x + stego_image
+        # Residual connection (conv1+conv2) + skip directo
+        if skip.shape == x.shape:
+            x = x + skip
 
-        x = self.pool(x)  # B x 64 x 8 x 8
-        B, C, H, W = x.shape
-        x = x.view(B, -1)  # B x 4096
+        # Segundo bloque
+        skip2 = x
+        x = self.conv3(x)
+        x = self.norm3(x)
+        x = self.act3(x)
 
-        if not self._fc_initialized:
-            self.fc = nn.Linear(C * H * W, self.message_size).to(x.device)
-            init.kaiming_uniform_(self.fc.weight, nonlinearity='linear')
-            nn.init.constant_(self.fc.bias, 0)
-            self._fc_initialized = True
-            self.add_module("fc", self.fc)
-            print("🧠 Decoder creado")
+        x = self.conv4(x)
+        x = self.norm4(x)
+        x = self.act4(x)
 
-        return self.fc(x)
+        if skip2.shape == x.shape:
+            x = x + skip2
+
+        x = self.pool(x)
+        x = x.view(x.size(0), -1)
+        x = self.fc(x)
+        return x
