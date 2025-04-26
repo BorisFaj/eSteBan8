@@ -61,7 +61,10 @@ mlflow = start_mlflow(params={
         "num_epochs": num_epochs,
         "image_loss_lambda": image_loss_lambda,
         "noise_std": noise_std,
-        "style_loss_weight": style_loss_weight
+        "style_loss_weight": style_loss_weight,
+        "message_weight": message_weight,
+        "EPOCHS_TO_VAL": EPOCHS_TO_VAL,
+        "EPOCHS_TO_SAVE": EPOCHS_TO_SAVE
     }, run_name=RUN_NAME)
 
 for epoch in range(num_epochs):
