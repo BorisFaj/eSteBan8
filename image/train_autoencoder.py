@@ -4,13 +4,13 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 from pytorch_msssim import ssim
 from torch import amp
-from encoder import Encoder
+from light_encoder import LightEncoder
 from decoder import Decoder
 from style_loss import edge_loss
 from data_handler import DataHandler
 from dotenv import load_dotenv
 import os
-from start_experiment import start_mlflow, log_gpu_stats, log_model
+from start_experiment import start_mlflow, log_gpu_stats, log_model_histograms
 import random
 
 
@@ -42,7 +42,7 @@ scaler = amp.GradScaler()
 writer = SummaryWriter(log_dir)
 
 # Modelos
-encoder = Encoder(image_channels=image_channels, message_size=message_size, image_size=image_size).to(dtype=torch.float32).to(device)
+encoder = LightEncoder(image_channels=image_channels, message_size=message_size, image_size=image_size).to(dtype=torch.float32).to(device)
 decoder = Decoder(image_channels=image_channels, message_size=message_size).to(dtype=torch.float32).to(device)
 encoder = torch.compile(encoder)
 decoder = torch.compile(decoder)
@@ -132,6 +132,9 @@ for epoch in range(num_epochs):
     writer.add_scalar("Loss/Image", avg_image_loss, epoch)
     writer.add_scalar("Loss/Style", avg_style, epoch)
     writer.add_scalar("Loss/Message", avg_message_loss, epoch)
+
+    log_model_histograms(writer, encoder, "Encoder", epoch)
+    log_model_histograms(writer, decoder, "Decoder", epoch)
 
     mlflow.log_metric("Loss/Image", avg_image_loss, step=epoch)
     mlflow.log_metric("Loss/Style", avg_style, step=epoch)

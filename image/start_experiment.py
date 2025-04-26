@@ -47,3 +47,10 @@ def log_gpu_stats(mlflow, epoch):
 
 def log_model(mlflow, model):
     mlflow.pytorch.log_model(model, os.getenv("EXPERIMENT_NAME"))
+
+def log_model_histograms(writer, model, model_name, epoch):
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            writer.add_histogram(f"{model_name}/Weights/{name}", param.data, epoch)
+            if param.grad is not None:
+                writer.add_histogram(f"{model_name}/Grads/{name}", param.grad, epoch)
