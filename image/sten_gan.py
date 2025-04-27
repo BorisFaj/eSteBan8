@@ -9,7 +9,6 @@ from light_decoder import LightDecoder
 from discriminator import Discriminator
 from torch import amp
 import math
-from style_loss import StyleLossHelper
 from dotenv import load_dotenv
 import os
 from data_handler import DataHandler
@@ -85,15 +84,14 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
     discriminator.eval()
 
     total_message_loss = 0
-    total_image_loss = 0
+    total_adv_loss = 0
     total_bit_accuracy = 0
-    total_style_loss = 0
+    total_disc_loss = 0
     num_batches = 0
 
     bce = nn.BCEWithLogitsLoss()
-    style_loss_helper = StyleLossHelper(device)
 
-    with torch.no_grad():
+    with torch.no_grad(), amp.autocast("cuda"):
         for i, (images, messages) in enumerate(test_loader):
             images = images.to(device)
             messages = messages.to(device)
@@ -101,48 +99,69 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
             # Forward
             stego_images = encoder(images, messages)
             recovered_messages = decoder(stego_images)
-
-            # Denormalizar imágenes para SSIM (de [-1,1] → [0,1])
-            images_01 = (images + 1) / 2
-            stego_images_01 = (stego_images + 1) / 2
+            disc_pred = discriminator(stego_images)
 
             # Métricas
+            disc_real = discriminator(images)
+            disc_fake = discriminator(stego_images)
+
+            disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
+                        F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
+
             message_loss = bce(recovered_messages, messages)
-            image_loss = (1 - ssim(stego_images_01, images_01, data_range=1.0, size_average=True)) + \
-                         image_loss_lambda * F.mse_loss(stego_images, images)
 
             pred_bits = (torch.sigmoid(recovered_messages) > 0.5).int()
             true_bits = messages.int().to(pred_bits.device)
             bit_accuracy = (pred_bits == true_bits).float().mean()
 
+            adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
+
             total_message_loss += message_loss.item()
-            total_image_loss += image_loss.detach().item()
+            total_adv_loss += adv_loss.detach().item()
             total_bit_accuracy += bit_accuracy.item()
-            total_style_loss += style_loss_helper(images_01, stego_images_01).item()  # Ojo! Esto chupa!
+            total_disc_loss += disc_loss.item()
 
 
             num_batches += 1
 
         avg_message_loss = total_message_loss / num_batches
-        avg_image_loss = total_image_loss / num_batches
         avg_bit_accuracy = total_bit_accuracy / num_batches
-        avg_style_loss = total_style_loss / num_batches
+        avg_adv_loss = total_adv_loss / num_batches
+        avg_disc_loss = total_disc_loss / num_batches
 
-        mlflow.log_metric("Test/Loss/Image", avg_image_loss, step=epoch)
+        # MLFlow logging por epoch
         mlflow.log_metric("Test/Loss/Message", avg_message_loss, step=epoch)
-        mlflow.log_metric("Test/Loss/Style", avg_style_loss, step=epoch)
+        mlflow.log_metric("Test/Loss/Discriminator", avg_disc_loss, step=epoch)
         mlflow.log_metric("Test/Accuracy/Bit", avg_bit_accuracy, step=epoch)
+        mlflow.log_metric("Test/Accuracy/Adversarial", avg_adv_loss, step=epoch)
 
+        # TensorBoard logging por epoch
         writer.add_scalar("Test/Loss/Message", avg_message_loss, epoch)
-        writer.add_scalar("Test/Loss/Image", avg_image_loss, epoch)
+        writer.add_scalar("Test/Loss/Discriminator", avg_disc_loss, epoch)
+        writer.add_scalar("Test/Loss/Adversarial", avg_adv_loss, epoch)
         writer.add_scalar("Test/Accuracy/Bit", avg_bit_accuracy, epoch)
-        writer.add_scalar("Test/Style/Loss", avg_style_loss, epoch)
 
-        # Imágenes ejemplo
+
+        # Imágenes
         img_grid_real = make_grid(images_01[:8].cpu(), nrow=4, normalize=True)
         img_grid_stego = make_grid(stego_images_01[:8].cpu(), nrow=4, normalize=True)
         writer.add_image("Test/Images/Real", img_grid_real, epoch)
         writer.add_image("Test/Images/Stego", img_grid_stego, epoch)
+
+        # Debug de diferencias entre stego-images
+        img = images[:2]  # coge dos imágenes del batch
+
+        # No necesitas volver a pasarlas por el encoder: ya tienes stego_images
+        stego = stego_images[:2]
+
+        diff = (stego[0] - stego[1]).abs().mean().item()
+        diff_map = ((stego[:1] - img[:1]) ** 2).mean(dim=1, keepdim=True)
+        norm_diff = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8)
+
+        writer.add_scalar("Debug/StegoMsgDiff", diff, epoch)
+        writer.add_image("Debug/DiffMap", diff_map[0], epoch)
+        writer.add_image("Debug/NormalizedDiffMap", norm_diff[0], epoch)
+        mlflow.log_metric("Debug/StegoMsgDiff", diff, step=epoch)
 
     encoder.train()
     decoder.train()
@@ -222,7 +241,7 @@ for epoch in range(start_epoch, num_epochs):
                 total_disc_loss += disc_loss.item()
                 disc_batches += 1
 
-                if disc_loss.item() <= FREEZE_DISC_LOSS:
+                if disc_loss.item() <= FREEZE_DISC_LOSS or not freeze_disc(global_step, epoch):
                     print("🧠 [Discriminador]: Paro de entrenar")
                     train_discriminator = False  # Deja de entrenar
 

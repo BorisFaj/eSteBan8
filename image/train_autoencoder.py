@@ -4,8 +4,8 @@ from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 from pytorch_msssim import ssim
 from torch import amp
-from light_encoder import LightEncoder
 from decoder import Decoder
+from encoder import Encoder
 from style_loss import edge_loss
 from data_handler import DataHandler
 from dotenv import load_dotenv
@@ -42,7 +42,7 @@ scaler = amp.GradScaler()
 writer = SummaryWriter(log_dir)
 
 # Modelos
-encoder = LightEncoder(image_channels=image_channels, message_size=message_size).to(dtype=torch.float32).to(device)
+encoder = Encoder(image_channels=image_channels, message_size=message_size).to(dtype=torch.float32).to(device)
 decoder = Decoder(image_channels=image_channels, message_size=message_size).to(dtype=torch.float32).to(device)
 encoder = torch.compile(encoder)
 decoder = torch.compile(decoder)
