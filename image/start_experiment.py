@@ -1,4 +1,5 @@
 import os
+import torch
 import mlflow
 import mlflow.pytorch
 from dotenv import load_dotenv
@@ -30,6 +31,8 @@ def start_mlflow(params: dict, run_name: str):
     return mlflow
 
 def get_gpu_stats():
+    torch.cuda.synchronize()  # Espera que el trabajo termine antes de medir
+
     mem_info = nvmlDeviceGetMemoryInfo(_handle)
     util = nvmlDeviceGetUtilizationRates(_handle)
     return {
@@ -42,5 +45,11 @@ def log_gpu_stats(mlflow, epoch):
     for k, v in get_gpu_stats().items():
         mlflow.log_metric(k, v, step=epoch)
 
-def log_model(mlflow, model):
-    mlflow.pytorch.log_model(model, os.getenv("EXPERIMENT_NAME"))
+def log_model_histograms(writer, model, model_name, epoch):
+    for name, param in model.named_parameters():
+        grad = param.grad
+        if grad is not None and torch.is_tensor(grad) and grad.numel() > 0:
+            if not torch.isnan(grad).all() and not torch.isinf(grad).all() and grad.abs().sum() > 0:
+                writer.add_histogram(f"{model_name}/Weights/{name}", param.data, epoch)
+                writer.add_histogram(f"{model_name}/Grads/{name}", grad, epoch)
+

@@ -4,11 +4,10 @@ import torch.nn.init as init
 
 
 class Encoder(nn.Module):
-    def __init__(self, image_channels, message_size, image_size):
+    def __init__(self, image_channels, message_size):
         super().__init__()
         self.image_channels = image_channels
         self.message_size = message_size
-        self.image_size = image_size
 
         # Capas convolucionales
         self.conv1 = nn.Conv2d(image_channels + message_size, 64, 3, padding=1)
