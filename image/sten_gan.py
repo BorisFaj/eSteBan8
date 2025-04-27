@@ -25,7 +25,6 @@ scaler = amp.GradScaler()
 # Parametros de las redes
 WARM_UP_LEN = int(os.getenv("WARM_UP_LEN"))  # numero de epochs que dejo al discriminador sin entrenar
 image_loss_lambda = float(os.getenv("image_loss_lambda"))  # Parametro para darle algo de tolerancia al image loss
-DISC_FREEZE_WINDOW = int(os.getenv("DISC_FREEZE_WINDOW"))  # ventana MAXIMA de epochs que se queda sin entrenar el discriminador despues del warmup
 FREEZE_DISC_LOSS = float(os.getenv("FREEZE_DISC_LOSS"))  # loss maximo que alcanza el discriminador antes de ser congelado
 
 image_channels = int(os.getenv("image_channels"))
@@ -39,6 +38,9 @@ EPOCHS_TO_SAVE = int(os.getenv("EPOCHS_TO_SAVE"))  # numero de epochs para guard
 noise_std = float(os.getenv("noise_std"))  # ruido que se le mete a la imagen generada. Entre 0.01 y 0.05 es razonable para imágenes normalizadas
 style_loss_weight = float(os.getenv("style_loss_weight"))
 message_weight = float(os.getenv("message_weight"))
+disc_loss_target = float(os.getenv("disc_loss_target"))
+message_loss_target = float(os.getenv("message_loss_target"))
+sharpness = float(os.getenv("sharpness"))
 
 RUN_NAME = os.getenv("RUN_NAME")
 
@@ -56,26 +58,49 @@ mlflow = start_mlflow({"warm_up_len": WARM_UP_LEN,
                        "batch_size": batch_size,
                        "message_size": message_size,
                        "image_loss_lambda": image_loss_lambda,
-                       "disc_freeze_windows": DISC_FREEZE_WINDOW,
                        "freeze_disc_loss": FREEZE_DISC_LOSS,
                        "image_channels": image_channels,
                        "image_size": image_size,
                        "num_epochs": num_epochs,
                        "image_input_res": IMAGE_INPUT_RES,
-                       "epochs_to_val": EPOCHS_TO_VAL,
-                       "epochs_to_save": EPOCHS_TO_SAVE,
                        "noise_std": noise_std,
                        "style_loss_weight": style_loss_weight,
                        "message_weight": message_weight,
                        "EPOCHS_TO_VAL": EPOCHS_TO_VAL,
-                       "EPOCHS_TO_SAVE": EPOCHS_TO_SAVE
+                       "EPOCHS_TO_SAVE": EPOCHS_TO_SAVE,
+                       "disc_loss_target": disc_loss_target,
+                       "message_loss_target": message_loss_target,
+                       "sharpness": sharpness
                        },
                       run_name=RUN_NAME)
 
-def freeze_disc(global_step: int, epoch: int, k: float=0.005) -> int:
+def should_train_discriminator(message_loss: float, disc_loss: float, writer, epoch, message_loss_target: float,
+                               disc_loss_target: float, sharpness: float) -> bool:
+    """
+    Calcula una probabilidad suave de entrenar el discriminador.
 
-    freeze_window = max(1, int(DISC_FREEZE_WINDOW * math.exp(-k * epoch)))
-    return global_step % freeze_window == 0
+    - Si sharpness es alto (e.g. 10), el cambio es brusco (como una puerta).
+    - Si sharpness es bajo (e.g. 2), el cambio es progresivo (margen amplio).
+
+    Devuelve un número entre 0 y 1.
+    """
+
+    # Normalizamos respecto a los objetivos
+    message_factor = max(0.0, 1.0 - (message_loss / message_loss_target))
+    disc_factor = max(0.0, 1.0 - (disc_loss / disc_loss_target))
+
+    # Combinamos (puedes ajustar pesos si quieres)
+    score = 0.5 * message_factor + 0.5 * disc_factor
+
+    # Aplicamos función sigmoide controlada por sharpness
+    probability = 1 / (1 + math.exp(-sharpness * (score - 0.5)))
+
+    # Asegurar que está en [0, 1]
+    probability = min(max(probability, 0.0), 1.0)
+
+    writer.add_scalar("Debug/Discriminator_Train_Prob", probability, epoch)
+
+    return torch.rand(1).item() < probability
 
 
 def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, device, epoch):
@@ -143,6 +168,8 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
 
 
         # Imágenes
+        images_01 = (images + 1) / 2
+        stego_images_01 = (stego_images + 1) / 2
         img_grid_real = make_grid(images_01[:8].cpu(), nrow=4, normalize=True)
         img_grid_stego = make_grid(stego_images_01[:8].cpu(), nrow=4, normalize=True)
         writer.add_image("Test/Images/Real", img_grid_real, epoch)
@@ -150,18 +177,18 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
 
         # Debug de diferencias entre stego-images
         img = images[:2]  # coge dos imágenes del batch
-
-        # No necesitas volver a pasarlas por el encoder: ya tienes stego_images
         stego = stego_images[:2]
 
         diff = (stego[0] - stego[1]).abs().mean().item()
         diff_map = ((stego[:1] - img[:1]) ** 2).mean(dim=1, keepdim=True)
         norm_diff = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8)
 
-        writer.add_scalar("Debug/StegoMsgDiff", diff, epoch)
-        writer.add_image("Debug/DiffMap", diff_map[0], epoch)
+        writer.add_image("Debug/Real", img[0].cpu(), epoch)
+        writer.add_image("Debug/Stego", stego[0].cpu(), epoch)
+        writer.add_image("Debug/Stego_vs_Real_DiffMap", diff_map[0], epoch)
         writer.add_image("Debug/NormalizedDiffMap", norm_diff[0], epoch)
-        mlflow.log_metric("Debug/StegoMsgDiff", diff, step=epoch)
+        writer.add_scalar("Debug/Stego1_vs_Stego2_MsgDiff", diff, epoch)
+        mlflow.log_metric("Debug/Stego1_vs_Stego2_MsgDiff", diff, step=epoch)
 
     encoder.train()
     decoder.train()
@@ -226,13 +253,15 @@ for epoch in range(start_epoch, num_epochs):
             stego_images = encoder(images, messages)
             recovered_messages = decoder(stego_images)
 
+            message_loss = bce(recovered_messages, messages)
+
+            disc_real = discriminator(images)
+            disc_fake = discriminator(stego_images.detach())
+
+            disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
+                        F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
+
             if train_discriminator:
-                disc_real = discriminator(images)
-                disc_fake = discriminator(stego_images.detach())
-
-                disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
-                            F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
-
                 disc_opt.zero_grad()
                 scaler.scale(disc_loss).backward()
                 scaler.step(disc_opt)
@@ -241,18 +270,29 @@ for epoch in range(start_epoch, num_epochs):
                 total_disc_loss += disc_loss.item()
                 disc_batches += 1
 
-                if disc_loss.item() <= FREEZE_DISC_LOSS or not freeze_disc(global_step, epoch):
+                if not should_train_discriminator(message_loss= message_loss.item(),
+                                                  disc_loss=disc_loss.item(),
+                                                  writer=writer,
+                                                  epoch=epoch,
+                                                  disc_loss_target=disc_loss_target,
+                                                  message_loss_target=message_loss_target,
+                                                  sharpness=sharpness):
                     print("🧠 [Discriminador]: Paro de entrenar")
                     train_discriminator = False  # Deja de entrenar
 
             else: # si no esta entrenando
-                if epoch > WARM_UP_LEN and freeze_disc(global_step, epoch):
+                if epoch > WARM_UP_LEN and should_train_discriminator(message_loss= message_loss.item(),
+                                                  disc_loss=disc_loss.item(),
+                                                  writer=writer,
+                                                  epoch=epoch,
+                                                  disc_loss_target=disc_loss_target,
+                                                  message_loss_target=message_loss_target,
+                                                  sharpness=sharpness):
                     print("🧠 [Discriminador]: empiezo a entrenar")
                     train_discriminator = True  # Empieza a entrenar
 
-            # Perdidas
+            # Resto de perdidas
             disc_pred = discriminator(stego_images)
-            message_loss = bce(recovered_messages, messages)
             adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
             total_loss = message_weight * message_loss + adv_loss
 
@@ -328,7 +368,7 @@ for epoch in range(start_epoch, num_epochs):
             "epoch": epoch,
             "encoder_state_dict": encoder.state_dict(),
             "decoder_state_dict": decoder.state_dict(),
-            "optimizer_state_dict": discriminator.state_dict(),
+            "discriminator_state_dict": discriminator.state_dict(),
             "scaler_state_dict": scaler.state_dict(),  # por si usas AMP
         }
         torch.save(checkpoint, f"{log_dir}/checkpoint_epoch_{epoch + 1}.pt")
