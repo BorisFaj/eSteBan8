@@ -45,12 +45,11 @@ def log_gpu_stats(mlflow, epoch):
     for k, v in get_gpu_stats().items():
         mlflow.log_metric(k, v, step=epoch)
 
-def log_model(mlflow, model):
-    mlflow.pytorch.log_model(model, os.getenv("EXPERIMENT_NAME"))
-
 def log_model_histograms(writer, model, model_name, epoch):
     for name, param in model.named_parameters():
-        if param.requires_grad:
-            writer.add_histogram(f"{model_name}/Weights/{name}", param.data, epoch)
-            if param.grad is not None:
-                writer.add_histogram(f"{model_name}/Grads/{name}", param.grad, epoch)
+        grad = param.grad
+        if grad is not None and torch.is_tensor(grad) and grad.numel() > 0:
+            if not torch.isnan(grad).all() and not torch.isinf(grad).all() and grad.abs().sum() > 0:
+                writer.add_histogram(f"{model_name}/Weights/{name}", param.data, epoch)
+                writer.add_histogram(f"{model_name}/Grads/{name}", grad, epoch)
+
