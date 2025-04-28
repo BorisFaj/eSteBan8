@@ -1,5 +1,4 @@
-from transformers import pipeline
-import torch
+from datasets import load_dataset
 import random
 import os
 import re
@@ -25,45 +24,41 @@ def is_valid_phrase(text):
         return False
     return True
 
-def clean_phrase(text, prompt):
-    return text.replace(prompt, "").strip().replace("\n", " ")
+def clean_phrase(text):
+    return text.strip().replace("\n", " ")
 
 def gen_file(path="data"):
     train_file = os.path.join(path, "generated_train.txt")
     val_file = os.path.join(path, "generated_val.txt")
 
-    device = 0 if torch.cuda.is_available() else -1
-    generator = pipeline('text-generation', model='heegyu/gpt2-emotion', device=device)
-
-    emotions = ["joy", "sadness", "anger", "fear", "love", "surprise"]
-    prompts = [f"I feel {emotion} because" for emotion in emotions]
-
     train_count, val_count = get_total_images()
     total_needed = train_count + val_count
-    generated_phrases = set()
 
-    print("🧠 Generando frases...")
-    while len(generated_phrases) < total_needed:
-        prompt = random.choice(prompts)
-        result = generator(prompt, max_length=50, num_return_sequences=1)[0]['generated_text']
-        phrase = clean_phrase(result, prompt)
+    print("🧠 Cargando dataset PAWS...")
+    dataset = load_dataset("paws", "labeled_final", split="train")
 
-        if is_valid_phrase(phrase):
-            generated_phrases.add(phrase)
+    all_phrases = set()
 
-        if len(generated_phrases) % 50 == 0:
-            print(f"✔️ {len(generated_phrases)} frases válidas")
+    for entry in dataset:
+        all_phrases.add(clean_phrase(entry['sentence1']))
+        all_phrases.add(clean_phrase(entry['sentence2']))
 
-    phrases = list(generated_phrases)
-    random.shuffle(phrases)
+    all_phrases = [p for p in all_phrases if is_valid_phrase(p)]
+
+    print(f"✔️ {len(all_phrases)} frases válidas disponibles")
+
+    if len(all_phrases) < total_needed:
+        raise ValueError(f"No hay suficientes frases válidas ({len(all_phrases)}) para cubrir {total_needed} imágenes.")
+
+    random.shuffle(all_phrases)
 
     with open(train_file, "w", encoding="utf-8") as f:
-        f.writelines(p + "\n" for p in phrases[:train_count])
+        f.writelines(p + "\n" for p in all_phrases[:train_count])
 
     with open(val_file, "w", encoding="utf-8") as f:
-        f.writelines(p + "\n" for p in phrases[train_count:])
+        f.writelines(p + "\n" for p in all_phrases[train_count:train_count + val_count])
 
-    print("✅ Frases generadas y guardadas")
+    print("✅ Frases de PAWS descargadas y guardadas")
 
 if __name__ == "__main__":
     gen_file()
