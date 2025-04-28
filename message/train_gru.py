@@ -10,16 +10,17 @@ from torch.utils.tensorboard import SummaryWriter
 from nltk.translate.bleu_score import sentence_bleu
 from nltk.translate.bleu_score import SmoothingFunction
 from text_coder import TextCompressorVAE
-from text_decoder import TextDecoder
+from lstm_attention import LSTMAttention
+
 
 smoother = SmoothingFunction().method1
 
 # --- Config ---
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 BATCH_SIZE = 16
-LATENT_DIM = 128
-EMBED_DIM = 128
-HIDDEN_DIM = LATENT_DIM
+LATENT_DIM = 768
+EMBED_DIM = 768
+HIDDEN_DIM = 768
 MAX_LEN = 60
 EPOCHS = 3000
 RUN_NAME = "eSteBert_v1.3s"
@@ -41,7 +42,7 @@ pad_token_id = tokenizer.pad_token_id
 
 # --- Modelos ---
 compressor = TextCompressorVAE(latent_dim=LATENT_DIM, pooling='cls', freeze_bert=True).to(DEVICE)
-decoder = TextDecoder(embedding_dim=EMBED_DIM, hidden_dim=HIDDEN_DIM, vocab_size=vocab_size, max_len=MAX_LEN).to(DEVICE)
+decoder = LSTMAttention(embedding_dim=EMBED_DIM, hidden_dim=HIDDEN_DIM, vocab_size=vocab_size, max_len=MAX_LEN).to(DEVICE)
 
 # --- Dataset ---
 print("🔄 Cargando dataset...")
@@ -97,6 +98,8 @@ for epoch in range(EPOCHS):
     avg_loss = total_loss / len(train_loader)
     print(f"📚 Epoch {epoch + 1}/{EPOCHS} — Loss: {avg_loss:.4f}")
     writer.add_scalar("Loss/train", avg_loss, epoch)
+    writer.add_scalar("Loss/CE_train", ce_loss.item(), epoch)
+    writer.add_scalar("Loss/KL_train", kl_loss.item(), epoch)
     writer.add_scalar("Perplexity/train", ppl.item(), epoch)
 
     # --- Validación ---

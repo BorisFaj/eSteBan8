@@ -4,8 +4,8 @@ from pytorch_msssim import ssim
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 import torch.nn.functional as F
-from light_encoder import LightEncoder
-from light_decoder import LightDecoder
+from encoder import Encoder
+from decoder import Decoder
 from discriminator import Discriminator
 from torch import amp
 import math
@@ -41,6 +41,7 @@ message_weight = float(os.getenv("message_weight"))
 disc_loss_target = float(os.getenv("disc_loss_target"))
 message_loss_target = float(os.getenv("message_loss_target"))
 sharpness = float(os.getenv("sharpness"))
+message_alpha = float(os.getenv("message_alpha"))
 
 RUN_NAME = os.getenv("RUN_NAME")
 
@@ -70,7 +71,8 @@ mlflow = start_mlflow({"warm_up_len": WARM_UP_LEN,
                        "EPOCHS_TO_SAVE": EPOCHS_TO_SAVE,
                        "disc_loss_target": disc_loss_target,
                        "message_loss_target": message_loss_target,
-                       "sharpness": sharpness
+                       "sharpness": sharpness,
+                       "message_alpha": message_alpha
                        },
                       run_name=RUN_NAME)
 
@@ -133,7 +135,9 @@ def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, de
             disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
                         F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
 
-            message_loss = bce(recovered_messages, messages)
+            _message_loss = bce(recovered_messages, messages)
+            l2_penalty = torch.mean(recovered_messages ** 2)
+            message_loss = _message_loss + message_alpha * l2_penalty
 
             pred_bits = (torch.sigmoid(recovered_messages) > 0.5).int()
             true_bits = messages.int().to(pred_bits.device)
@@ -213,8 +217,8 @@ train_dataset, train_loader, test_dataset, test_loader = DataHandler(batch_size=
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-encoder = LightEncoder(image_channels=image_channels, message_size=message_size).to(device)
-decoder = LightDecoder(image_channels=image_channels, message_size=message_size).to(device)
+encoder = Encoder(image_channels=image_channels, message_size=message_size).to(device)
+decoder = Decoder(image_channels=image_channels, message_size=message_size).to(device)
 discriminator = Discriminator(image_channels=image_channels).to(device)
 
 enc_dec_opt = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-4)
@@ -238,13 +242,8 @@ for epoch in range(start_epoch, num_epochs):
     train_discriminator = False
 
     for i, (images, messages) in enumerate(train_loader):
-        images = get_noisy(images).to(device)
+        images = images.to(device)
         messages = messages.to(device)
-
-        if noise_std > 0:
-            noise = torch.randn_like(images) * noise_std
-            images = images + noise
-            images = torch.clamp(images, -1, 1)  # mantén en el rango [-1, 1]
 
         adv_loss = F.mse_loss(torch.ones_like(torch.tensor([0.])), torch.ones_like(torch.tensor([0.])))  # 0
 
@@ -253,7 +252,9 @@ for epoch in range(start_epoch, num_epochs):
             stego_images = encoder(images, messages)
             recovered_messages = decoder(stego_images)
 
-            message_loss = bce(recovered_messages, messages)
+            _message_loss = bce(recovered_messages, messages)
+            l2_penalty = torch.mean(recovered_messages ** 2)
+            message_loss = _message_loss + message_alpha * l2_penalty
 
             disc_real = discriminator(images)
             disc_fake = discriminator(stego_images.detach())
@@ -294,6 +295,7 @@ for epoch in range(start_epoch, num_epochs):
             # Resto de perdidas
             disc_pred = discriminator(stego_images)
             adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
+
             total_loss = message_weight * message_loss + adv_loss
 
             enc_dec_opt.zero_grad()
@@ -308,22 +310,17 @@ for epoch in range(start_epoch, num_epochs):
             true_bits = messages.int().to(pred_bits.device)
             bit_accuracy = (pred_bits == true_bits).float().mean()
 
-            # Image loss
-            images_32 = images.float()
-            stego_32 = stego_images.float()
-            qq = (1 - ssim(stego_32, images_32, data_range=1.0, size_average=True)) + \
-                         image_loss_lambda * F.mse_loss(stego_images, images)
-
 
         total_message_loss += message_loss.item()
-
         total_adv_loss += adv_loss.item()
         total_bit_accuracy += bit_accuracy.item()
         num_batches += 1
         global_step += 1
 
-        del total_loss, message_loss, adv_loss, recovered_messages, disc_pred
         torch.cuda.empty_cache()
+
+        if epoch % 100 == 0 and i == 0:
+            writer.add_histogram('RecoveredMessages/Values', recovered_messages, global_step)
 
     # Promedio por epoch
     if disc_batches > 0:
