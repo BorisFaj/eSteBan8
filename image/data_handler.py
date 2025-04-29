@@ -1,5 +1,5 @@
 from torch.utils.data import DataLoader
-from img_embedding_dataset import JPEGAndEmbeddingDataset
+from img_embedding_dataset import JPEGWithEmbeddingFromChromaDataset
 import multiprocessing
 
 class DataHandler:
@@ -8,8 +8,8 @@ class DataHandler:
         self.num_workers = multiprocessing.cpu_count()
 
     def get(self):
-        train_dataset = JPEGAndEmbeddingDataset(image_dir="openimages_custom/train", embedding_dir="data/train_preprocessed")
-        test_dataset = JPEGAndEmbeddingDataset(image_dir="openimages_custom/val", embedding_dir="data/val_preprocessed")
+        train_dataset = JPEGWithEmbeddingFromChromaDataset(image_dir="openimages_custom/train/default", collection_name="embeddings_train")
+        test_dataset = JPEGWithEmbeddingFromChromaDataset(image_dir="openimages_custom/val/default", collection_name="embeddings_train")
 
         train_loader = DataLoader(
             train_dataset,
