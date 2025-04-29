@@ -12,4 +12,3 @@ fiftyone
 python-dotenv
 mlflow
 pynvml
-chromadb
