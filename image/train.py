@@ -252,8 +252,8 @@ for epoch in range(start_epoch, num_epochs):
     train_discriminator = False
 
     for i, (images, messages) in enumerate(train_loader):
-        images = images.to(device)
-        messages = messages.to(device)
+        images = images.to(device, non_blocking=True)
+        messages = messages.to(device, non_blocking=True)
 
         adv_loss = F.mse_loss(torch.ones_like(torch.tensor([0.])), torch.ones_like(torch.tensor([0.])))  # 0
 
@@ -329,8 +329,6 @@ for epoch in range(start_epoch, num_epochs):
         num_batches += 1
         global_step += 1
 
-        torch.cuda.empty_cache()
-
         if epoch % 100 == 0 and i == 0:
             writer.add_histogram('RecoveredMessages/Values', recovered_messages, global_step)
 
@@ -393,6 +391,8 @@ for epoch in range(start_epoch, num_epochs):
         mlflow.log_artifact(f"{log_dir}/checkpoint_epoch_{epoch + 1}.pt")
 
         print(f"Modelos guardados en MLFlow")
+
+    torch.cuda.empty_cache()
 
 mlflow.end_run()
 writer.close()

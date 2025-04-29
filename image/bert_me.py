@@ -53,7 +53,7 @@ def text_and_image_to_bert_chromadb(
 
 if __name__ == "__main__":
     text_and_image_to_bert_chromadb(
-        captions_path="data/generated_val.txt",
-        image_dir="openimages_custom/val",
-        collection_name="embeddings_val"
+        captions_path="data/generated_train.txt",
+        image_dir="openimages_custom/train",
+        collection_name="embeddings_train"
     )
