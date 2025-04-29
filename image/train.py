@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from pytorch_msssim import ssim
+from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 import torch.nn.functional as F
@@ -42,6 +42,7 @@ disc_loss_target = float(os.getenv("disc_loss_target"))
 message_loss_target = float(os.getenv("message_loss_target"))
 sharpness = float(os.getenv("sharpness"))
 message_alpha = float(os.getenv("message_alpha"))
+pct_start = float(os.getenv("pct_start"))
 
 RUN_NAME = os.getenv("RUN_NAME")
 
@@ -72,7 +73,10 @@ mlflow = start_mlflow({"warm_up_len": WARM_UP_LEN,
                        "disc_loss_target": disc_loss_target,
                        "message_loss_target": message_loss_target,
                        "sharpness": sharpness,
-                       "message_alpha": message_alpha
+                       "message_alpha": message_alpha,
+                        "scheduler": "OneCycleLR",
+                        "pct_start": pct_start,
+                        "anneal_strategy": "cos"
                        },
                       run_name=RUN_NAME)
 
@@ -221,8 +225,14 @@ encoder = Encoder(image_channels=image_channels, message_size=message_size).to(d
 decoder = Decoder(image_channels=image_channels, message_size=message_size).to(device)
 discriminator = Discriminator(image_channels=image_channels).to(device)
 
+# === Definición de optimizadores ===
 enc_dec_opt = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-4)
 disc_opt = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
+
+# === Definición de schedulers ===
+steps_per_epoch = len(train_loader)
+scheduler_enc_dec = OneCycleLR(enc_dec_opt, max_lr=1e-4, steps_per_epoch=steps_per_epoch, epochs=num_epochs, pct_start=0.1, anneal_strategy='cos')
+scheduler_disc = OneCycleLR(disc_opt, max_lr=1e-4, steps_per_epoch=steps_per_epoch, epochs=num_epochs, pct_start=0.1, anneal_strategy='cos')
 
 bce = nn.BCEWithLogitsLoss()
 
@@ -266,6 +276,7 @@ for epoch in range(start_epoch, num_epochs):
                 disc_opt.zero_grad()
                 scaler.scale(disc_loss).backward()
                 scaler.step(disc_opt)
+                scheduler_disc.step()
                 scaler.update()
 
                 total_disc_loss += disc_loss.item()
@@ -301,6 +312,7 @@ for epoch in range(start_epoch, num_epochs):
             enc_dec_opt.zero_grad()
             scaler.scale(total_loss).backward()
             scaler.step(enc_dec_opt)
+            scheduler_enc_dec.step()
             scaler.update()
             log_gpu_stats(mlflow=mlflow, epoch=epoch)
 
@@ -358,6 +370,15 @@ for epoch in range(start_epoch, num_epochs):
 
     writer.add_image("Images/Real", img_grid_real, epoch)
     writer.add_image("Images/Stego", img_grid_stego, epoch)
+
+    current_lr_enc_dec = scheduler_enc_dec.get_last_lr()[0]
+    current_lr_disc = scheduler_disc.get_last_lr()[0]
+
+    writer.add_scalar('LR/EncDec', current_lr_enc_dec, global_step)
+    writer.add_scalar('LR/Disc', current_lr_disc, global_step)
+
+    mlflow.log_metric('LR/EncDec', current_lr_enc_dec, step=global_step)
+    mlflow.log_metric('LR/Disc', current_lr_disc, step=global_step)
 
     # Guardar modelos cada EPOCHS_TO_SAVE epochs
     if (epoch + 1) % EPOCHS_TO_SAVE == 0:
