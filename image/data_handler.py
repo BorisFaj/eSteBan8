@@ -13,13 +13,11 @@ class DataHandler:
     def get(self):
         train_dataset = JPEGWithEmbeddingFromChromaDataset(image_dir="openimages_custom/train",
                                                            collection_name="embeddings_train",
-                                                           vector_db_client=self.client,
-                                                           image_names_path="data/image_names_train.txt"
+                                                           vector_db_client=self.client
                                                            )
         test_dataset = JPEGWithEmbeddingFromChromaDataset(image_dir="openimages_custom/val",
                                                           collection_name="embeddings_val",
-                                                          vector_db_client=self.client,
-                                                          image_names_path="data/image_names_val.txt"
+                                                          vector_db_client=self.client
                                                           )
 
         train_loader = DataLoader(

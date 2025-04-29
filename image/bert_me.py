@@ -4,42 +4,24 @@ import torch
 import chromadb
 import os
 
-
 def text_and_image_to_bert_chromadb(
-        captions_path: str,
-        image_dir: str,
-        collection_name: str,
-        image_names_path: str = None
-):
-    # Paso 1: Leer captions
+    captions_path: str,
+    image_dir: str,
+    collection_name: str):
     with open(captions_path, "r", encoding="utf-8") as f:
         sentences = [line.strip() for line in f if line.strip()]
 
-    # Paso 2: Leer imágenes en orden controlado
-    if image_names_path and os.path.exists(image_names_path):
-        with open(image_names_path, "r", encoding="utf-8") as f:
-            image_names = [line.strip() for line in f if line.strip()]
-        print(f"📄 Cargando nombres de imagen desde '{image_names_path}'.")
-    else:
-        image_names = sorted([f for f in os.listdir(image_dir) if f.endswith(".jpg")])
-        if image_names_path:
-            with open(image_names_path, "w", encoding="utf-8") as f:
-                for name in image_names:
-                    f.write(f"{name}\n")
-            print(f"✅ Orden de imágenes guardado en '{image_names_path}'.")
+    image_names = sorted([f for f in os.listdir(image_dir) if f.lower().endswith((".jpg", ".png", ".jpeg"))])
 
     assert len(sentences) == len(image_names), f"⚠️ {len(sentences)} captions vs {len(image_names)} imágenes"
 
-    # Paso 3: Preparar BERT
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
     model = BertModel.from_pretrained("bert-base-uncased").to(device)
     model.eval()
 
-    # Paso 4: Preparar ChromaDB persistente
     client = chromadb.PersistentClient(path="./chromadb_storage")
 
-    # BORRAR la colección anterior si existe
     try:
         client.delete_collection(name=collection_name)
         print(f"🗑️ Colección '{collection_name}' borrada antes de crearla de nuevo.")
@@ -48,24 +30,20 @@ def text_and_image_to_bert_chromadb(
 
     collection = client.create_collection(name=collection_name)
 
-    # Paso 5: Procesar e insertar
     with torch.no_grad():
-        for i in tqdm(range(len(sentences)), desc="Procesando texto + guardando en ChromaDB"):
-            sentence = sentences[i]
-            image_name = image_names[i]
-            image_id = os.path.splitext(image_name)[0]
-
+        for sentence, image_name in tqdm(zip(sentences, image_names), total=len(sentences), desc="Procesando"):
             inputs = tokenizer(sentence, return_tensors="pt", padding=True, truncation=True).to(device)
             outputs = model(**inputs)
             embedding = outputs.last_hidden_state[:, 0, :].squeeze(0).cpu().float()
 
+            # Insertar en ChromaDB usando nombre de imagen completo como ID
             collection.add(
                 embeddings=[embedding.tolist()],
                 metadatas=[{
                     "caption": sentence,
                     "image_name": image_name
                 }],
-                ids=[image_id]
+                ids=[image_name]  # Aquí guardamos el nombre COMPLETO de imagen como ID
             )
 
             del inputs, outputs
@@ -73,11 +51,9 @@ def text_and_image_to_bert_chromadb(
 
     print(f"✅ {len(sentences)} embeddings guardados en colección '{collection_name}' en './chromadb_storage'.")
 
-
 if __name__ == "__main__":
     text_and_image_to_bert_chromadb(
-        captions_path="data/generated_train.txt",
-        image_dir="openimages_custom/train",
-        collection_name="embeddings_train",
-        image_names_path="data/image_names_train.txt"
+        captions_path="data/generated_val.txt",
+        image_dir="openimages_custom/val",
+        collection_name="embeddings_val"
     )
