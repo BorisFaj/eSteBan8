@@ -7,10 +7,10 @@ from tqdm import tqdm
 RESOLUTION = (384, 384)
 DATASET_NAME = "open-images-v6"
 SAVE_DIR = Path("openimages_custom")
-TRAIN_DIR = SAVE_DIR / "train" / "default"
-VAL_DIR = SAVE_DIR / "val" / "default"
-NUM_TRAIN = 6000
-NUM_VAL = 2000
+TRAIN_DIR = SAVE_DIR / "train"
+VAL_DIR = SAVE_DIR / "val"
+NUM_TRAIN = 20000
+NUM_VAL = 8000
 
 def resize_and_save(src_path, dst_path):
     try:

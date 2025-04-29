@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-from pytorch_msssim import ssim
+from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 import torch.nn.functional as F
@@ -42,6 +42,7 @@ disc_loss_target = float(os.getenv("disc_loss_target"))
 message_loss_target = float(os.getenv("message_loss_target"))
 sharpness = float(os.getenv("sharpness"))
 message_alpha = float(os.getenv("message_alpha"))
+pct_start = float(os.getenv("pct_start"))
 
 RUN_NAME = os.getenv("RUN_NAME")
 
@@ -72,7 +73,10 @@ mlflow = start_mlflow({"warm_up_len": WARM_UP_LEN,
                        "disc_loss_target": disc_loss_target,
                        "message_loss_target": message_loss_target,
                        "sharpness": sharpness,
-                       "message_alpha": message_alpha
+                       "message_alpha": message_alpha,
+                        "scheduler": "OneCycleLR",
+                        "pct_start": pct_start,
+                        "anneal_strategy": "cos"
                        },
                       run_name=RUN_NAME)
 
@@ -105,7 +109,7 @@ def should_train_discriminator(message_loss: float, disc_loss: float, writer, ep
     return torch.rand(1).item() < probability
 
 
-def evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, device, epoch):
+def evaluate_step(encoder, decoder, discriminator, test_loader, writer, device, epoch):
     encoder.eval()
     decoder.eval()
     discriminator.eval()
@@ -208,6 +212,112 @@ def get_noisy(image):
     else:
         return image
 
+def train_step(train_discriminator, total_disc_loss, disc_batches):
+    adv_loss = F.mse_loss(torch.ones_like(torch.tensor([0.])), torch.ones_like(torch.tensor([0.])))  # 0
+
+    # Forward
+    with amp.autocast("cuda"):
+        stego_images = encoder(images, messages)
+        recovered_messages = decoder(stego_images)
+
+        _message_loss = bce(recovered_messages, messages)
+        l2_penalty = torch.mean(recovered_messages ** 2)
+        message_loss = _message_loss + message_alpha * l2_penalty
+
+        disc_real = discriminator(images)
+        disc_fake = discriminator(stego_images.detach())
+
+        disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
+                    F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
+
+        if train_discriminator:
+            disc_opt.zero_grad()
+            scaler.scale(disc_loss).backward()
+            scaler.step(disc_opt)
+            scheduler_disc.step()
+            scaler.update()
+
+            total_disc_loss += disc_loss.item()
+            disc_batches += 1
+
+            if not should_train_discriminator(message_loss=message_loss.item(),
+                                              disc_loss=disc_loss.item(),
+                                              writer=writer,
+                                              epoch=epoch,
+                                              disc_loss_target=disc_loss_target,
+                                              message_loss_target=message_loss_target,
+                                              sharpness=sharpness):
+                print("🧠 [Discriminador]: Paro de entrenar")
+                train_discriminator = False  # Deja de entrenar
+
+        else:  # si no esta entrenando
+            if epoch > WARM_UP_LEN and should_train_discriminator(message_loss=message_loss.item(),
+                                                                  disc_loss=disc_loss.item(),
+                                                                  writer=writer,
+                                                                  epoch=epoch,
+                                                                  disc_loss_target=disc_loss_target,
+                                                                  message_loss_target=message_loss_target,
+                                                                  sharpness=sharpness):
+                print("🧠 [Discriminador]: empiezo a entrenar")
+                train_discriminator = True  # Empieza a entrenar
+
+        # Resto de perdidas
+        disc_pred = discriminator(stego_images)
+        adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
+
+        total_loss = message_weight * message_loss + adv_loss
+
+        enc_dec_opt.zero_grad()
+        scaler.scale(total_loss).backward()
+        scaler.step(enc_dec_opt)
+        scheduler_enc_dec.step()
+        scaler.update()
+        log_gpu_stats(mlflow=mlflow, epoch=epoch)
+
+
+    return train_discriminator, adv_loss, message_loss, recovered_messages, stego_images
+
+def log_epoch(mlflow, writer, epoch, avg_message_loss, avg_disc_loss, avg_bit_accuracy, avg_adv_loss,
+              images, stego_images, global_step, current_lr_enc_dec, current_lr_disc):
+    # MLFlow logging por epoch
+    mlflow.log_metric("Loss/Message", avg_message_loss, step=epoch)
+    mlflow.log_metric("Loss/Discriminator", avg_disc_loss, step=epoch)
+    mlflow.log_metric("Accuracy/Bit", avg_bit_accuracy, step=epoch)
+    mlflow.log_metric("Accuracy/Adversarial", avg_adv_loss, step=epoch)
+
+    # TensorBoard logging por epoch
+    writer.add_scalar("Loss/Message", avg_message_loss, epoch)
+    writer.add_scalar("Loss/Discriminator", avg_disc_loss, epoch)
+    writer.add_scalar("Loss/Adversarial", avg_adv_loss, epoch)
+    writer.add_scalar("Accuracy/Bit", avg_bit_accuracy, epoch)
+
+    images_01 = (images + 1) / 2
+    stego_images_01 = (stego_images + 1) / 2
+    img_grid_real = make_grid(images_01[:8].cpu(), nrow=4, normalize=False)
+    img_grid_stego = make_grid(stego_images_01[:8].detach().cpu(), nrow=4, normalize=False)
+
+    writer.add_image("Images/Real", img_grid_real, epoch)
+    writer.add_image("Images/Stego", img_grid_stego, epoch)
+
+    writer.add_scalar('LR/EncDec', current_lr_enc_dec, global_step)
+    writer.add_scalar('LR/Disc', current_lr_disc, global_step)
+
+    mlflow.log_metric('LR/EncDec', current_lr_enc_dec, step=global_step)
+    mlflow.log_metric('LR/Disc', current_lr_disc, step=global_step)
+
+def save_models(mlflow, epoch, encoder, decoder, discriminator, scaler, log_dir):
+    checkpoint = {
+        "epoch": epoch,
+        "encoder_state_dict": encoder.state_dict(),
+        "decoder_state_dict": decoder.state_dict(),
+        "discriminator_state_dict": discriminator.state_dict(),
+        "scaler_state_dict": scaler.state_dict(),  # por si usas AMP
+    }
+    torch.save(checkpoint, f"{log_dir}/checkpoint_epoch_{epoch + 1}.pt")
+    mlflow.log_artifact(f"{log_dir}/checkpoint_epoch_{epoch + 1}.pt")
+
+    print(f"Modelos guardados en MLFlow")
+
 # Entrenamiento
 writer = SummaryWriter(log_dir)
 writer.add_text("Entrenamiento", "Iniciado correctamente", 0)
@@ -221,13 +331,22 @@ encoder = Encoder(image_channels=image_channels, message_size=message_size).to(d
 decoder = Decoder(image_channels=image_channels, message_size=message_size).to(device)
 discriminator = Discriminator(image_channels=image_channels).to(device)
 
+encoder = torch.compile(encoder)
+decoder = torch.compile(decoder)
+discriminator = torch.compile(discriminator)
+
+# === Optimizadores ===
 enc_dec_opt = torch.optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=1e-4)
 disc_opt = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
+
+# === Schedulers ===
+steps_per_epoch = len(train_loader)
+scheduler_enc_dec = OneCycleLR(enc_dec_opt, max_lr=1e-4, steps_per_epoch=steps_per_epoch, epochs=num_epochs, pct_start=0.1, anneal_strategy='cos')
+scheduler_disc = OneCycleLR(disc_opt, max_lr=1e-4, steps_per_epoch=steps_per_epoch, epochs=num_epochs, pct_start=0.1, anneal_strategy='cos')
 
 bce = nn.BCEWithLogitsLoss()
 
 global_step = 0
-# start_epoch = load_latest_checkpoint(checkpoint_dir, RUN_NAME, encoder, decoder, discriminator)
 start_epoch = 0
 
 # Empieza la marcha
@@ -245,64 +364,11 @@ for epoch in range(start_epoch, num_epochs):
         images = images.to(device)
         messages = messages.to(device)
 
-        adv_loss = F.mse_loss(torch.ones_like(torch.tensor([0.])), torch.ones_like(torch.tensor([0.])))  # 0
-
-        # Forward
-        with amp.autocast("cuda"):
-            stego_images = encoder(images, messages)
-            recovered_messages = decoder(stego_images)
-
-            _message_loss = bce(recovered_messages, messages)
-            l2_penalty = torch.mean(recovered_messages ** 2)
-            message_loss = _message_loss + message_alpha * l2_penalty
-
-            disc_real = discriminator(images)
-            disc_fake = discriminator(stego_images.detach())
-
-            disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
-                        F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
-
-            if train_discriminator:
-                disc_opt.zero_grad()
-                scaler.scale(disc_loss).backward()
-                scaler.step(disc_opt)
-                scaler.update()
-
-                total_disc_loss += disc_loss.item()
-                disc_batches += 1
-
-                if not should_train_discriminator(message_loss= message_loss.item(),
-                                                  disc_loss=disc_loss.item(),
-                                                  writer=writer,
-                                                  epoch=epoch,
-                                                  disc_loss_target=disc_loss_target,
-                                                  message_loss_target=message_loss_target,
-                                                  sharpness=sharpness):
-                    print("🧠 [Discriminador]: Paro de entrenar")
-                    train_discriminator = False  # Deja de entrenar
-
-            else: # si no esta entrenando
-                if epoch > WARM_UP_LEN and should_train_discriminator(message_loss= message_loss.item(),
-                                                  disc_loss=disc_loss.item(),
-                                                  writer=writer,
-                                                  epoch=epoch,
-                                                  disc_loss_target=disc_loss_target,
-                                                  message_loss_target=message_loss_target,
-                                                  sharpness=sharpness):
-                    print("🧠 [Discriminador]: empiezo a entrenar")
-                    train_discriminator = True  # Empieza a entrenar
-
-            # Resto de perdidas
-            disc_pred = discriminator(stego_images)
-            adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
-
-            total_loss = message_weight * message_loss + adv_loss
-
-            enc_dec_opt.zero_grad()
-            scaler.scale(total_loss).backward()
-            scaler.step(enc_dec_opt)
-            scaler.update()
-            log_gpu_stats(mlflow=mlflow, epoch=epoch)
+        train_discriminator, adv_loss, message_loss, recovered_messages, stego_images = train_step(
+            train_discriminator=train_discriminator,
+            disc_batches=disc_batches,
+            total_disc_loss=total_disc_loss
+        )
 
         with torch.no_grad():
             # Bit Accuracy
@@ -310,14 +376,11 @@ for epoch in range(start_epoch, num_epochs):
             true_bits = messages.int().to(pred_bits.device)
             bit_accuracy = (pred_bits == true_bits).float().mean()
 
-
         total_message_loss += message_loss.item()
         total_adv_loss += adv_loss.item()
         total_bit_accuracy += bit_accuracy.item()
         num_batches += 1
         global_step += 1
-
-        torch.cuda.empty_cache()
 
         if epoch % 100 == 0 and i == 0:
             writer.add_histogram('RecoveredMessages/Values', recovered_messages, global_step)
@@ -333,45 +396,22 @@ for epoch in range(start_epoch, num_epochs):
 
 
     if (epoch + 1) % EPOCHS_TO_VAL == 0:
-        evaluate_on_testset(encoder, decoder, discriminator, test_loader, writer, device, epoch)
-        print("Evaluado sobre el test wey")
+        evaluate_step(encoder, decoder, discriminator, test_loader, writer, device, epoch)
+        print("Evaluando sobre el test wey")
+    current_lr_enc_dec = scheduler_enc_dec.get_last_lr()[0]
+    current_lr_disc = scheduler_disc.get_last_lr()[0]
 
-    # MLFlow logging por epoch
-    mlflow.log_metric("Loss/Message", avg_message_loss, step=epoch)
-    mlflow.log_metric("Loss/Discriminator", avg_disc_loss, step=epoch)
-    mlflow.log_metric("Accuracy/Bit", avg_bit_accuracy, step=epoch)
-    mlflow.log_metric("Accuracy/Adversarial", avg_adv_loss, step=epoch)
+    log_epoch(mlflow, writer, epoch, avg_message_loss, avg_disc_loss, avg_bit_accuracy, avg_adv_loss,
+              images, stego_images, global_step, current_lr_enc_dec, current_lr_disc)
 
-    # TensorBoard logging por epoch
-    writer.add_scalar("Loss/Message", avg_message_loss, epoch)
-    writer.add_scalar("Loss/Discriminator", avg_disc_loss, epoch)
-    writer.add_scalar("Loss/Adversarial", avg_adv_loss, epoch)
-    writer.add_scalar("Accuracy/Bit", avg_bit_accuracy, epoch)
     log_model_histograms(writer, encoder, "Encoder", epoch)
     log_model_histograms(writer, decoder, "Decoder", epoch)
     log_model_histograms(writer, discriminator, "Discriminator", epoch)
 
-    images_01 = (images + 1) / 2
-    stego_images_01 = (stego_images + 1) / 2
-    img_grid_real = make_grid(images_01[:8].cpu(), nrow=4, normalize=False)
-    img_grid_stego = make_grid(stego_images_01[:8].detach().cpu(), nrow=4, normalize=False)
-
-    writer.add_image("Images/Real", img_grid_real, epoch)
-    writer.add_image("Images/Stego", img_grid_stego, epoch)
-
-    # Guardar modelos cada EPOCHS_TO_SAVE epochs
     if (epoch + 1) % EPOCHS_TO_SAVE == 0:
-        checkpoint = {
-            "epoch": epoch,
-            "encoder_state_dict": encoder.state_dict(),
-            "decoder_state_dict": decoder.state_dict(),
-            "discriminator_state_dict": discriminator.state_dict(),
-            "scaler_state_dict": scaler.state_dict(),  # por si usas AMP
-        }
-        torch.save(checkpoint, f"{log_dir}/checkpoint_epoch_{epoch + 1}.pt")
-        mlflow.log_artifact(f"{log_dir}/checkpoint_epoch_{epoch + 1}.pt")
+        save_models(mlflow, epoch, encoder, decoder, discriminator, scaler, log_dir)
 
-        print(f"Modelos guardados en MLFlow")
+    torch.cuda.empty_cache()
 
 mlflow.end_run()
 writer.close()

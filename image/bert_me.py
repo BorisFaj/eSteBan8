@@ -36,6 +36,6 @@ def text_and_image_to_bert(
 
 if __name__ == "__main__":
     text_and_image_to_bert(
-        captions_path="data/generated_val.txt",
-        output_dir="data/val_preprocessed"
+        captions_path="data/generated_train.txt",
+        output_dir="data/train_preprocessed"
     )

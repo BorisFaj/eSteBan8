@@ -8,8 +8,8 @@ class DataHandler:
         self.num_workers = multiprocessing.cpu_count()
 
     def get(self):
-        train_dataset = JPEGAndEmbeddingDataset(image_dir="openimages_custom/train/default", embedding_dir="data/train_preprocessed")
-        test_dataset = JPEGAndEmbeddingDataset(image_dir="openimages_custom/val/default", embedding_dir="data/val_preprocessed")
+        train_dataset = JPEGAndEmbeddingDataset(image_dir="openimages_custom/train", embedding_dir="data/train_preprocessed")
+        test_dataset = JPEGAndEmbeddingDataset(image_dir="openimages_custom/val", embedding_dir="data/val_preprocessed")
 
         train_loader = DataLoader(
             train_dataset,
