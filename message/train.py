@@ -57,9 +57,9 @@ val_dataset = val_dataset.map(lambda x: {"input_ids": tokenizer.encode(x["text"]
 train_dataset.set_format(type="torch", columns=["input_ids"])
 val_dataset.set_format(type="torch", columns=["input_ids"])
 
-train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True)
+train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
 
-# --- Funciones ---
+
 def train_step(batch):
     input_ids = batch["input_ids"].to(DEVICE)
     targets = input_ids[:, 1:]
@@ -76,6 +76,7 @@ def train_step(batch):
 
     optimizer.zero_grad()
     loss.backward()
+    torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=1.0)
     optimizer.step()
 
     return loss.item()
@@ -84,7 +85,7 @@ def validate_step():
     decoder.eval()
     bert.eval()
 
-    sample_size = 10
+    sample_size = min(10, len(val_dataset))
     sample_batch = val_dataset.select(random.sample(range(len(val_dataset)), sample_size))
 
     refs, hyps, bleus, rouges = [], [], [], []
@@ -115,10 +116,26 @@ def validate_step():
     avg_rouge1 = sum(r["rouge1"] for r in rouges) / sample_size
     avg_rougel = sum(r["rougeL"] for r in rouges) / sample_size
 
+    writer.add_text("Sample/Reference", refs[0], epoch)
+    writer.add_text("Sample/Hypothesis", hyps[0], epoch)
+
     return avg_bleu, avg_rouge1, avg_rougel
 
 # --- Entrenamiento principal ---
-for epoch in range(1, EPOCHS + 1):
+
+start_epoch = 1
+latest_ckpt = sorted([f for f in os.listdir(CKPT_DIR) if f.endswith(".pt")])
+if latest_ckpt:
+    path = os.path.join(CKPT_DIR, latest_ckpt[-1])
+    checkpoint = torch.load(path)
+    decoder.load_state_dict(checkpoint['decoder_state_dict'])
+    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+    start_epoch = checkpoint['epoch'] + 1
+    print(f"✅ Reanudado desde {path}")
+
+
+for epoch in range(start_epoch, EPOCHS + 1):
     decoder.train()
 
     total_loss = 0
@@ -132,8 +149,11 @@ for epoch in range(1, EPOCHS + 1):
     print(f"📚 Epoch {epoch}/{EPOCHS} — Loss: {avg_loss:.4f} — Perplexity: {ppl:.2f}")
     writer.add_scalar("Loss/train", avg_loss, epoch)
     writer.add_scalar("Perplexity/train", ppl, epoch)
+    grad_norm = torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=1.0)
+    writer.add_scalar("GradientNorm", grad_norm, epoch)
 
     scheduler.step()
+    writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
 
     # Validación
     if epoch % VALIDATE_EVERY == 0:
@@ -144,6 +164,11 @@ for epoch in range(1, EPOCHS + 1):
 
     # Checkpoint
     if epoch % SAVE_EVERY == 0 or epoch == EPOCHS:
-        torch.save(decoder.state_dict(), os.path.join(CKPT_DIR, f"decoder_epoch{epoch}.pt"))
+        torch.save({
+            'epoch': epoch,
+            'decoder_state_dict': decoder.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+        }, os.path.join(CKPT_DIR, f"decoder_epoch{epoch}.pt"))
 
 writer.close()
