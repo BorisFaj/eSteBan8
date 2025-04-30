@@ -213,6 +213,7 @@ def get_noisy(image):
         return image
 
 def train_step(train_discriminator, total_disc_loss, disc_batches):
+    bce = nn.BCEWithLogitsLoss()
     adv_loss = F.mse_loss(torch.ones_like(torch.tensor([0.])), torch.ones_like(torch.tensor([0.])))  # 0
 
     # Forward
@@ -282,6 +283,17 @@ def train_step(train_discriminator, total_disc_loss, disc_batches):
             print("Recovered messages stats:", recovered_messages.min().item(), recovered_messages.max().item())
             raise ValueError("Message loss es NaN o inf")
 
+
+        if message_loss < 0.0:
+            raise Exception(f"WTF Loss negativo en el mensaje!!\n."
+                            f"message_loss = _message_loss + message_alpha * l2_penalty\n"
+                            f"message_loss: {message_loss}\n"
+                            f"_message_loss: {_message_loss}\n"
+                            f"message_alpha: {message_alpha}\n"
+                            f"l2_penalty: {l2_penalty}\n"
+                            )
+
+
     return train_discriminator, adv_loss, message_loss, recovered_messages, stego_images
 
 def log_epoch(mlflow, writer, epoch, avg_message_loss, avg_disc_loss, avg_bit_accuracy, avg_adv_loss,
@@ -350,8 +362,6 @@ disc_opt = torch.optim.Adam(discriminator.parameters(), lr=1e-4)
 steps_per_epoch = len(train_loader)
 scheduler_enc_dec = OneCycleLR(enc_dec_opt, max_lr=1e-4, steps_per_epoch=steps_per_epoch, epochs=num_epochs, pct_start=0.1, anneal_strategy='cos')
 scheduler_disc = OneCycleLR(disc_opt, max_lr=1e-4, steps_per_epoch=steps_per_epoch, epochs=num_epochs, pct_start=0.1, anneal_strategy='cos')
-
-bce = nn.BCEWithLogitsLoss()
 
 global_step = 0
 start_epoch = 0
