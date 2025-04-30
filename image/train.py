@@ -166,7 +166,7 @@ def evaluate_step(encoder, decoder, discriminator, test_loader, writer, device, 
         mlflow.log_metric("Test/Loss/Message", avg_message_loss, step=epoch)
         mlflow.log_metric("Test/Loss/Discriminator", avg_disc_loss, step=epoch)
         mlflow.log_metric("Test/Accuracy/Bit", avg_bit_accuracy, step=epoch)
-        mlflow.log_metric("Test/Accuracy/Adversarial", avg_adv_loss, step=epoch)
+        mlflow.log_metric("Test/Loss/Adversarial", avg_adv_loss, step=epoch)
 
         # TensorBoard logging por epoch
         writer.add_scalar("Test/Loss/Message", avg_message_loss, epoch)
@@ -234,8 +234,11 @@ def train_step(train_discriminator, total_disc_loss, disc_batches):
             disc_opt.zero_grad()
             scaler.scale(disc_loss).backward()
             scaler.step(disc_opt)
-            scheduler_disc.step()
             scaler.update()
+
+            # Solo avanzar el scheduler si hubo grads válidos
+            if any(p.grad is not None for p in discriminator.parameters()):
+                scheduler_disc.step()
 
             total_disc_loss += disc_loss.item()
             disc_batches += 1
@@ -274,6 +277,10 @@ def train_step(train_discriminator, total_disc_loss, disc_batches):
         scaler.update()
         log_gpu_stats(mlflow=mlflow, epoch=epoch)
 
+        if torch.isnan(message_loss) or torch.isinf(message_loss):
+            print("🛑 NaN o inf en message_loss")
+            print("Recovered messages stats:", recovered_messages.min().item(), recovered_messages.max().item())
+            raise ValueError("Message loss es NaN o inf")
 
     return train_discriminator, adv_loss, message_loss, recovered_messages, stego_images
 
@@ -283,7 +290,7 @@ def log_epoch(mlflow, writer, epoch, avg_message_loss, avg_disc_loss, avg_bit_ac
     mlflow.log_metric("Loss/Message", avg_message_loss, step=epoch)
     mlflow.log_metric("Loss/Discriminator", avg_disc_loss, step=epoch)
     mlflow.log_metric("Accuracy/Bit", avg_bit_accuracy, step=epoch)
-    mlflow.log_metric("Accuracy/Adversarial", avg_adv_loss, step=epoch)
+    mlflow.log_metric("Loss/Adversarial", avg_adv_loss, step=epoch)
 
     # TensorBoard logging por epoch
     writer.add_scalar("Loss/Message", avg_message_loss, epoch)
@@ -370,6 +377,9 @@ for epoch in range(start_epoch, num_epochs):
             total_disc_loss=total_disc_loss
         )
 
+        if message_loss < 0.0:
+            raise Exception(f"WTF. message_loss: {message_loss}")
+
         with torch.no_grad():
             # Bit Accuracy
             pred_bits = (torch.sigmoid(recovered_messages) > 0.5).int()
@@ -382,8 +392,8 @@ for epoch in range(start_epoch, num_epochs):
         num_batches += 1
         global_step += 1
 
-        if epoch % 100 == 0 and i == 0:
-            writer.add_histogram('RecoveredMessages/Values', recovered_messages, global_step)
+        if total_message_loss < 0.0:
+            raise Exception(f"WTF. total_message_loss: {total_message_loss}")
 
     # Promedio por epoch
     if disc_batches > 0:
@@ -394,9 +404,13 @@ for epoch in range(start_epoch, num_epochs):
     avg_adv_loss = total_adv_loss / num_batches
     avg_bit_accuracy = total_bit_accuracy / num_batches
 
+    if avg_message_loss < 0.0:
+        raise Exception(f"WTF. avg_message_loss: {avg_message_loss}")
+
 
     if (epoch + 1) % EPOCHS_TO_VAL == 0:
         evaluate_step(encoder, decoder, discriminator, test_loader, writer, device, epoch)
+        writer.add_histogram('RecoveredMessages/Values', recovered_messages, global_step)
         print("Evaluando sobre el test wey")
     current_lr_enc_dec = scheduler_enc_dec.get_last_lr()[0]
     current_lr_disc = scheduler_disc.get_last_lr()[0]
