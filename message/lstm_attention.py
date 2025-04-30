@@ -21,8 +21,10 @@ class LSTMAttention(nn.Module):
         batch_size = z.size(0)
         device = z.device
 
-        hidden = (z.unsqueeze(0).repeat(self.lstm.num_layers, 1, 1),
-                  torch.zeros_like(z.unsqueeze(0).repeat(self.lstm.num_layers, 1, 1)))
+        hidden = (
+            z.unsqueeze(0).repeat(self.lstm.num_layers, 1, 1),
+            torch.zeros_like(z.unsqueeze(0).repeat(self.lstm.num_layers, 1, 1))
+        )
 
         inputs = torch.full((batch_size, 1), sos_token_id, dtype=torch.long, device=device)
 
@@ -31,20 +33,21 @@ class LSTMAttention(nn.Module):
         else:
             seq_len = targets.size(1)
 
-        # Prealocar tensores
-        outputs_tensor = torch.zeros(batch_size, seq_len, self.fc_out.out_features, device=device)
-        hidden_states_tensor = torch.zeros(batch_size, seq_len, self.lstm.hidden_size, device=device)
+        outputs = []
+        hidden_states = []
 
         for t in range(seq_len):
             embedded = self.embedding(inputs)
-            output, hidden = self.lstm(embedded, hidden)
-            hidden_states_tensor[:, t:t+1, :] = output  # guardamos en la posición correspondiente
+            output, hidden = self.lstm(embedded, hidden)  # output: [batch, 1, hidden_dim]
+            hidden_states.append(output)
 
-            context = self._compute_attention(output, hidden_states_tensor[:, :t+1, :])
+            # construye el tensor hasta el paso t
+            past_hidden_states = torch.cat(hidden_states, dim=1)  # [batch, t+1, hidden_dim]
+            context = self._compute_attention(output, past_hidden_states)
             concat_output = torch.cat([output, context], dim=-1)
 
             logits = self.fc_out(concat_output)
-            outputs_tensor[:, t:t+1, :] = logits  # guardamos output
+            outputs.append(logits)
 
             if generate:
                 inputs = torch.argmax(logits, dim=-1)
@@ -54,7 +57,7 @@ class LSTMAttention(nn.Module):
                 else:
                     inputs = torch.argmax(logits, dim=-1)
 
-        return outputs_tensor
+        return torch.cat(outputs, dim=1)  # [batch, seq_len, vocab_size]
 
     def _compute_attention(self, current_output, past_hidden_states):
         """

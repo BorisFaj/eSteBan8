@@ -9,8 +9,13 @@ from datasets import load_dataset
 from torch.utils.tensorboard import SummaryWriter
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 from lstm_attention import LSTMAttention
+import mlflow
+import mlflow.pytorch
+from dotenv import load_dotenv
 
 # --- Config ---
+torch.autograd.set_detect_anomaly(True)
+
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 BATCH_SIZE = 16
 EMBED_DIM = 768
@@ -59,6 +64,28 @@ val_dataset.set_format(type="torch", columns=["input_ids"])
 
 train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=2, pin_memory=True)
 
+
+def start_mlflow(params: dict, run_name: str):
+    load_dotenv()
+    mlflow.set_tracking_uri(os.getenv("DATABRICKS_HOST"))
+
+    os.environ["MLFLOW_TRACKING_USERNAME"] = os.getenv("DATABRICKS_USER_NAME")
+    os.environ["MLFLOW_TRACKING_PASSWORD"] = os.getenv("DATABRICKS_TOKEN")
+
+    databricks_user = os.getenv("DATABRICKS_USER_NAME")
+    experiment_name = os.getenv("EXPERIMENT_NAME")
+
+    # Ruta completa del experimento
+    experiment_path = f"/Users/{databricks_user}/{experiment_name}"
+
+    print("MLflow Tracking URI:", mlflow.get_tracking_uri())
+    print("Usando experimento:", experiment_path)
+
+    mlflow.set_experiment(experiment_path)
+    mlflow.start_run(run_name=run_name)
+    mlflow.log_params(params)
+
+    return mlflow
 
 def train_step(batch):
     input_ids = batch["input_ids"].to(DEVICE)
@@ -134,6 +161,16 @@ if latest_ckpt:
     start_epoch = checkpoint['epoch'] + 1
     print(f"✅ Reanudado desde {path}")
 
+mlflow = start_mlflow({"BATCH_SIZE": BATCH_SIZE,
+                       "EMBED_DIM": EMBED_DIM,
+                       "HIDDEN_DIM": HIDDEN_DIM,
+                       "MAX_LEN": MAX_LEN,
+                       "EPOCHS": EPOCHS,
+                       "VALIDATE_EVERY": VALIDATE_EVERY,
+                       "SAVE_EVERY": SAVE_EVERY,
+                       "RUN_NAME": RUN_NAME
+                       },
+                      run_name=RUN_NAME)
 
 for epoch in range(start_epoch, EPOCHS + 1):
     decoder.train()
@@ -147,13 +184,19 @@ for epoch in range(start_epoch, EPOCHS + 1):
     ppl = torch.exp(torch.tensor(avg_loss))
 
     print(f"📚 Epoch {epoch}/{EPOCHS} — Loss: {avg_loss:.4f} — Perplexity: {ppl:.2f}")
+    grad_norm = torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=1.0)
     writer.add_scalar("Loss/train", avg_loss, epoch)
     writer.add_scalar("Perplexity/train", ppl, epoch)
-    grad_norm = torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=1.0)
     writer.add_scalar("GradientNorm", grad_norm, epoch)
 
     scheduler.step()
     writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
+
+    mlflow.log_metric("Loss/train", avg_loss, step=epoch)
+    mlflow.log_metric("Perplexity/train", ppl, step=epoch)
+    mlflow.log_metric("GradientNorm", grad_norm, step=epoch)
+    mlflow.log_metric("LR", scheduler.get_last_lr()[0], step=epoch)
+
 
     # Validación
     if epoch % VALIDATE_EVERY == 0:
@@ -161,6 +204,10 @@ for epoch in range(start_epoch, EPOCHS + 1):
         writer.add_scalar("BLEU/val", avg_bleu, epoch)
         writer.add_scalar("ROUGE1/val", avg_rouge1, epoch)
         writer.add_scalar("ROUGE-L/val", avg_rougel, epoch)
+
+        mlflow.log_metric("BLEU/val", avg_bleu, step=epoch)
+        mlflow.log_metric("ROUGE1/val", avg_rouge1, step=epoch)
+        mlflow.log_metric("ROUGE-L/val", avg_rougel, step=epoch)
 
     # Checkpoint
     if epoch % SAVE_EVERY == 0 or epoch == EPOCHS:
