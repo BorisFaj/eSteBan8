@@ -123,7 +123,7 @@ def get_noisy(image):
         return image
 
 def train_step(writer, epoch, images, messages, encoder, discriminator, train_discriminator, disc_opt, scheduler_disc, enc_dec_opt,
-               scheduler_enc_dec, total_disc_loss, disc_batches, scaler):
+               scheduler_enc_dec, total_disc_loss, scaler):
 
     # Forward
     with amp.autocast("cuda"):
@@ -146,7 +146,6 @@ def train_step(writer, epoch, images, messages, encoder, discriminator, train_di
                 scheduler_disc.step()
 
             total_disc_loss += disc_loss.item()
-            disc_batches += 1
 
             if not should_train_discriminator(disc_loss=disc_loss.item(),
                                               writer=writer,
@@ -310,7 +309,6 @@ def train_model(train_loader, test_loader, encoder, discriminator, scaler, sched
                 scheduler_disc=scheduler_disc,
                 enc_dec_opt=enc_dec_opt,
                 scheduler_enc_dec=scheduler_enc_dec,
-                disc_batches=disc_batches,
                 total_disc_loss=total_disc_loss,
                 scaler=scaler
             )
@@ -320,10 +318,12 @@ def train_model(train_loader, test_loader, encoder, discriminator, scaler, sched
             global_step += 1
 
         # Promedio por epoch
-        if disc_batches > 0:
+        if train_discriminator:
+            disc_batches += 1
             avg_disc_loss = total_disc_loss / disc_batches
         else:
             avg_disc_loss = 0
+
         avg_adv_loss = total_adv_loss / num_batches
 
         if (epoch + 1) % EPOCHS_TO_VAL == 0:
