@@ -1,5 +1,5 @@
 import torch
-import torch.nn as nn
+import re
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
@@ -213,24 +213,20 @@ def save_models(epoch, encoder, discriminator, scaler, checkpoint_dir):
 
     print(f"Modelos guardados ;)")
 
-import re
+
+def _strip_orig_mod_keys(state_dict):
+    """Corrige keys con prefijo _orig_mod. para que coincidan con modelos no compilados."""
+    if all(k.startswith("_orig_mod.") for k in state_dict.keys()):
+        print("🧩 Detectado checkpoint compilado. Corrigiendo claves...")
+        return {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
+    return state_dict
 
 def load_checkpoint(checkpoint_dir, encoder, discriminator, scaler):
-    """
-    Carga el último checkpoint disponible desde disco.
-    Devuelve:
-        - epoch (int): último epoch guardado
-        - encoder (con pesos cargados)
-        - discriminator (con pesos cargados)
-        - scaler (con estado AMP restaurado)
-    """
-    # Buscar archivos de checkpoint
     checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_epoch_") and f.endswith(".pt")]
     if not checkpoints:
         print("⚠️ No se encontró ningún checkpoint. Entrenamiento comenzará desde cero.")
         return 0, encoder, discriminator, scaler
 
-    # Ordenar por número de epoch
     checkpoints.sort(key=lambda f: int(re.findall(r"\d+", f)[-1]))
     last_checkpoint = checkpoints[-1]
     path = os.path.join(checkpoint_dir, last_checkpoint)
@@ -238,12 +234,14 @@ def load_checkpoint(checkpoint_dir, encoder, discriminator, scaler):
     print(f"🔁 Cargando checkpoint desde {path}")
     checkpoint = torch.load(path, map_location="cuda" if torch.cuda.is_available() else "cpu")
 
-    encoder.load_state_dict(checkpoint["encoder_state_dict"])
-    discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
+    # ✨ Arreglar claves si vienen de modelos compilados
+    encoder.load_state_dict(_strip_orig_mod_keys(checkpoint["encoder_state_dict"]))
+    discriminator.load_state_dict(_strip_orig_mod_keys(checkpoint["discriminator_state_dict"]))
     scaler.load_state_dict(checkpoint["scaler_state_dict"])
-    epoch = checkpoint["epoch"] + 1  # retomamos desde el siguiente
+    epoch = checkpoint["epoch"] + 1
 
     return epoch, encoder, discriminator, scaler
+
 
 
 # Entrenamiento
@@ -255,9 +253,6 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
 
     encoder = Encoder(image_channels=image_channels, message_size=message_size).to(device)
     discriminator = Discriminator(image_channels=image_channels).to(device)
-
-    encoder = torch.compile(encoder)
-    discriminator = torch.compile(discriminator)
 
     # === Optimizadores ===
     enc_dec_opt = torch.optim.Adam(list(encoder.parameters()), lr=1e-4)
@@ -275,6 +270,10 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
     start_epoch, encoder, discriminator, scaler = load_checkpoint(
         checkpoint_dir, encoder, discriminator, scaler
     )
+
+    # Compilar pesos justo antes de empezar a entrenar
+    encoder = torch.compile(encoder)
+    discriminator = torch.compile(discriminator)
 
     # Config MLFlow
     _ = start_mlflow()
@@ -302,6 +301,7 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
         },)
 
         train_model(
+            start_epoch=start_epoch,
             train_loader=train_loader,
             test_loader=test_loader,
             encoder=encoder,
@@ -316,13 +316,12 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
         )
 
 
-def train_model(train_loader, test_loader, encoder, discriminator, scaler, scheduler_enc_dec, scheduler_disc, disc_opt,
+def train_model(start_epoch, train_loader, test_loader, encoder, discriminator, scaler, scheduler_enc_dec, scheduler_disc, disc_opt,
                 enc_dec_opt, checkpoint_dir, log_dir):
     writer = SummaryWriter(log_dir)
     writer.add_text("Entrenamiento", "Iniciado correctamente", 0)
     writer.flush()
 
-    start_epoch = 0
     global_step = 0
     # Empieza la marcha
     for epoch in range(start_epoch, num_epochs):
@@ -388,7 +387,7 @@ def train_model(train_loader, test_loader, encoder, discriminator, scaler, sched
         log_model_histograms(writer, discriminator, "Discriminator", epoch)
 
         if (epoch + 1) % EPOCHS_TO_SAVE == 0:
-            save_models(epoch, encoder, discriminator, scaler, log_dir)
+            save_models(epoch, encoder, discriminator, scaler, checkpoint_dir)
 
         torch.cuda.empty_cache()
 
