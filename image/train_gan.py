@@ -12,7 +12,7 @@ from dotenv import load_dotenv
 import mlflow
 import os
 from data_handler import DataHandler
-from mlflow_utils import log_gpu_stats, log_model_histograms
+from mlflow_utils import log_gpu_stats, log_model_histograms, start_mlflow
 
 
 def should_train_discriminator(disc_loss: float, writer, epoch, disc_loss_target: float, sharpness: float) -> bool:
@@ -238,6 +238,9 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
 
     # Scaler
     scaler = amp.GradScaler()
+
+    # Config MLFlow
+    _ = start_mlflow()
 
     with mlflow.start_run(run_name=run_name) as run:
         mlflow.log_params({
