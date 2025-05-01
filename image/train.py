@@ -375,6 +375,7 @@ for epoch in range(start_epoch, num_epochs):
     num_batches = 0
     disc_batches = 0
     total_bit_accuracy = 0
+    total_recovered_messages = 0
     train_discriminator = False
 
     for i, (images, messages) in enumerate(train_loader):
@@ -399,6 +400,7 @@ for epoch in range(start_epoch, num_epochs):
         total_message_loss += message_loss.item()
         total_adv_loss += adv_loss.item()
         total_bit_accuracy += bit_accuracy.item()
+        total_recovered_messages += recovered_messages
         num_batches += 1
         global_step += 1
 
@@ -413,6 +415,7 @@ for epoch in range(start_epoch, num_epochs):
     avg_message_loss = total_message_loss / num_batches
     avg_adv_loss = total_adv_loss / num_batches
     avg_bit_accuracy = total_bit_accuracy / num_batches
+    avg_recovered_messages = total_recovered_messages / num_batches
 
     if avg_message_loss < 0.0:
         raise Exception(f"WTF. avg_message_loss: {avg_message_loss}")
@@ -420,7 +423,6 @@ for epoch in range(start_epoch, num_epochs):
 
     if (epoch + 1) % EPOCHS_TO_VAL == 0:
         evaluate_step(encoder, decoder, discriminator, test_loader, writer, device, epoch)
-        writer.add_histogram('RecoveredMessages/Values', recovered_messages, global_step)
         print("Evaluando sobre el test wey")
     current_lr_enc_dec = scheduler_enc_dec.get_last_lr()[0]
     current_lr_disc = scheduler_disc.get_last_lr()[0]
