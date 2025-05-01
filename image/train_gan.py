@@ -213,6 +213,39 @@ def save_models(epoch, encoder, discriminator, scaler, checkpoint_dir):
 
     print(f"Modelos guardados ;)")
 
+import re
+
+def load_checkpoint(checkpoint_dir, encoder, discriminator, scaler):
+    """
+    Carga el último checkpoint disponible desde disco.
+    Devuelve:
+        - epoch (int): último epoch guardado
+        - encoder (con pesos cargados)
+        - discriminator (con pesos cargados)
+        - scaler (con estado AMP restaurado)
+    """
+    # Buscar archivos de checkpoint
+    checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_epoch_") and f.endswith(".pt")]
+    if not checkpoints:
+        print("⚠️ No se encontró ningún checkpoint. Entrenamiento comenzará desde cero.")
+        return 0, encoder, discriminator, scaler
+
+    # Ordenar por número de epoch
+    checkpoints.sort(key=lambda f: int(re.findall(r"\d+", f)[-1]))
+    last_checkpoint = checkpoints[-1]
+    path = os.path.join(checkpoint_dir, last_checkpoint)
+
+    print(f"🔁 Cargando checkpoint desde {path}")
+    checkpoint = torch.load(path, map_location="cuda" if torch.cuda.is_available() else "cpu")
+
+    encoder.load_state_dict(checkpoint["encoder_state_dict"])
+    discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
+    scaler.load_state_dict(checkpoint["scaler_state_dict"])
+    epoch = checkpoint["epoch"] + 1  # retomamos desde el siguiente
+
+    return epoch, encoder, discriminator, scaler
+
+
 # Entrenamiento
 def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channels, image_size, batch_size, num_epochs,
           image_input_res, epochs_to_val, epochs_to_save, noise_std, style_loss_weight, disc_loss_target, sharpness,
@@ -237,6 +270,11 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
 
     # Scaler
     scaler = amp.GradScaler()
+
+    # Resume checkpoint
+    start_epoch, encoder, discriminator, scaler = load_checkpoint(
+        checkpoint_dir, encoder, discriminator, scaler
+    )
 
     # Config MLFlow
     _ = start_mlflow()
