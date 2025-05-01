@@ -8,7 +8,7 @@ from pynvml import nvmlInit, nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo
 nvmlInit()
 _handle = nvmlDeviceGetHandleByIndex(0)
 
-def start_mlflow(params: dict, run_name: str):
+def start_mlflow():
     load_dotenv()
     mlflow.set_tracking_uri(os.getenv("DATABRICKS_HOST"))
 
@@ -25,8 +25,6 @@ def start_mlflow(params: dict, run_name: str):
     print("Usando experimento:", experiment_path)
 
     mlflow.set_experiment(experiment_path)
-    mlflow.start_run(run_name=run_name)
-    mlflow.log_params(params)
 
     return mlflow
 
