@@ -12,7 +12,7 @@ import math
 from dotenv import load_dotenv
 import os
 from data_handler import DataHandler
-from start_experiment import start_mlflow, log_gpu_stats, log_model_histograms
+from mlflow_utils import start_mlflow, log_gpu_stats, log_model_histograms
 load_dotenv()
 
 # Cuda
