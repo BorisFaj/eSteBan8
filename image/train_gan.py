@@ -204,44 +204,40 @@ def log_epoch(writer, epoch, avg_disc_loss, avg_adv_loss, images, stego_images, 
 def save_models(epoch, encoder, discriminator, scaler, checkpoint_dir):
     checkpoint = {
         "epoch": epoch,
-        "encoder_state_dict": encoder.state_dict(),
-        "discriminator_state_dict": discriminator.state_dict(),
-        "scaler_state_dict": scaler.state_dict(),  # por si usas AMP
+        "encoder_state_dict": encoder._orig_mod.state_dict(),
+        "discriminator_state_dict": discriminator._orig_mod.state_dict(),
+        "scaler_state_dict": scaler.state_dict(),
     }
-    torch.save(checkpoint, f"{checkpoint_dir}/checkpoint_epoch_{epoch + 1}.pt")
-    mlflow.log_artifact(f"{checkpoint_dir}/checkpoint_epoch_{epoch + 1}.pt")
-
-    print(f"Modelos guardados ;)")
-
-
-def _strip_orig_mod_keys(state_dict):
-    """Corrige keys con prefijo _orig_mod. para que coincidan con modelos no compilados."""
-    if all(k.startswith("_orig_mod.") for k in state_dict.keys()):
-        print("🧩 Detectado checkpoint compilado. Corrigiendo claves...")
-        return {k.replace("_orig_mod.", ""): v for k, v in state_dict.items()}
-    return state_dict
+    path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch + 1}.pt")
+    torch.save(checkpoint, path)
+    mlflow.log_artifact(path)
+    print(f"✅ Modelos guardados correctamente en {path}")
 
 def load_checkpoint(checkpoint_dir, encoder, discriminator, scaler):
+    """
+    Carga el último checkpoint desde disco para modelos compilados.
+    Asume que los modelos fueron guardados con `. _orig_mod.state_dict()`
+    y que los nuevos modelos están compilados.
+    """
     checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_epoch_") and f.endswith(".pt")]
     if not checkpoints:
         print("⚠️ No se encontró ningún checkpoint. Entrenamiento comenzará desde cero.")
         return 0, encoder, discriminator, scaler
 
+    # Buscar el último checkpoint por número de epoch
     checkpoints.sort(key=lambda f: int(re.findall(r"\d+", f)[-1]))
     last_checkpoint = checkpoints[-1]
     path = os.path.join(checkpoint_dir, last_checkpoint)
 
-    print(f"🔁 Cargando checkpoint desde {path}")
+    print(f"🔁 Cargando checkpoint compilado desde {path}")
     checkpoint = torch.load(path, map_location="cuda" if torch.cuda.is_available() else "cpu")
 
-    # ✨ Arreglar claves si vienen de modelos compilados
-    encoder.load_state_dict(_strip_orig_mod_keys(checkpoint["encoder_state_dict"]))
-    discriminator.load_state_dict(_strip_orig_mod_keys(checkpoint["discriminator_state_dict"]))
+    encoder.load_state_dict(checkpoint["encoder_state_dict"])  # modelos ya compilados
+    discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
     scaler.load_state_dict(checkpoint["scaler_state_dict"])
-    epoch = checkpoint["epoch"] + 1
+    epoch = checkpoint["epoch"] + 1  # empezamos en el siguiente
 
     return epoch, encoder, discriminator, scaler
-
 
 
 # Entrenamiento
@@ -266,14 +262,14 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
     # Scaler
     scaler = amp.GradScaler()
 
+    # Compilar pesos
+    encoder = torch.compile(encoder)
+    discriminator = torch.compile(discriminator)
+
     # Resume checkpoint
     start_epoch, encoder, discriminator, scaler = load_checkpoint(
         checkpoint_dir, encoder, discriminator, scaler
     )
-
-    # Compilar pesos justo antes de empezar a entrenar
-    encoder = torch.compile(encoder)
-    discriminator = torch.compile(discriminator)
 
     # Config MLFlow
     _ = start_mlflow()
