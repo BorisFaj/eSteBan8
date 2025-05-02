@@ -167,11 +167,11 @@ def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, 
         disc_opt.zero_grad()
         scaler.scale(disc_loss).backward()
         scaler.step(disc_opt)
-        scaler.update()
 
-        # Solo avanzar el scheduler si hubo grads válidos
         if any(p.grad is not None for p in discriminator.parameters()):
             scheduler_disc.step()
+
+        scaler.update()
 
     return disc_loss
 
