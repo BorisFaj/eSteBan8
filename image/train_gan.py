@@ -121,6 +121,25 @@ def get_noisy(image, noise_std):
     else:
         return image
 
+def gradient_magnitude(img):
+    # Filtros Sobel en X e Y
+    sobel_x = torch.tensor([[1, 0, -1],
+                            [2, 0, -2],
+                            [1, 0, -1]], dtype=torch.float32).view(1, 1, 3, 3)
+    sobel_y = torch.tensor([[1, 2, 1],
+                            [0, 0, 0],
+                            [-1, -2, -1]], dtype=torch.float32).view(1, 1, 3, 3)
+
+    # Suponemos imagenes normalizadas en [-1, 1], y de shape (B, C, H, W)
+    gx = F.conv2d(img, sobel_x.to(img.device), padding=1, groups=img.shape[1])
+    gy = F.conv2d(img, sobel_y.to(img.device), padding=1, groups=img.shape[1])
+    return torch.sqrt(gx ** 2 + gy ** 2)
+
+def sobel_loss(stego, original):
+    grad_stego = gradient_magnitude(stego)
+    grad_orig = gradient_magnitude(original)
+    return F.l1_loss(grad_stego, grad_orig)
+
 def calc_disc_loss(discriminator, images, stego_images):
     disc_real = discriminator(images)
     disc_fake = discriminator(stego_images.detach())
@@ -167,11 +186,19 @@ def train_step(epoch, images, messages, encoder, discriminator, train_discrimina
             train=train_discriminator
         )
 
+        k_adv = 1.0
+        k_img = 1.0
+        k_edge = 0.2
+
         disc_pred = discriminator(stego_images)
         adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
+        image_loss = F.mse_loss(stego_images, images)
+        edge_loss = sobel_loss(stego_images, images)
+
+        total_loss = k_adv * adv_loss + k_img * image_loss + k_edge * edge_loss
 
         enc_dec_opt.zero_grad()
-        scaler.scale(adv_loss).backward()
+        scaler.scale(total_loss).backward()
         scaler.step(enc_dec_opt)
         scheduler_enc_dec.step()
         scaler.update()
