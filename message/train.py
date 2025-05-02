@@ -235,12 +235,12 @@ def start(device, batch_size, run_name, checkpoint_dir, log_dir, embed_dim, max_
 
     # --- Dataset ---
     print("🔄 Cargando dataset...")
-    raw_dataset = load_dataset("wikitext", "wikitext-2-raw-v1")['train']
+    raw_dataset = load_dataset("wikitext", "wikitext-103-raw-v1")['train']
     dataset = raw_dataset.train_test_split(test_size=0.1, seed=42)
     train_dataset, val_dataset = dataset["train"], dataset["test"]
 
-    train_dataset = train_dataset.filter(lambda x: x["text"].strip() != "" and 10 < len(x["text"].split()) < 50)
-    val_dataset = val_dataset.filter(lambda x: x["text"].strip() != "" and 10 < len(x["text"].split()) < 50)
+    train_dataset = train_dataset.filter(lambda x: x["text"].strip() != "" and 10 < len(x["text"].split()) < 60)
+    val_dataset = val_dataset.filter(lambda x: x["text"].strip() != "" and 10 < len(x["text"].split()) < 60)
 
     train_dataset = train_dataset.map(
         lambda x: {"input_ids": tokenizer.encode(x["text"], truncation=True, max_length=max_len, padding="max_length")})
