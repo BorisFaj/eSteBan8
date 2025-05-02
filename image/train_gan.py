@@ -71,7 +71,6 @@ def evaluate_step(encoder, discriminator, test_loader, writer, device, epoch):
             total_adv_loss += adv_loss.detach().item()
             total_disc_loss += disc_loss.item()
 
-
             num_batches += 1
 
         avg_adv_loss = total_adv_loss / num_batches
@@ -317,8 +316,7 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             global_step += 1
 
         # Termina de entrenar este epoch
-        if train_discriminator:
-            disc_batches += 1
+
 
         # Evalua si toca
         if (epoch + 1) % EPOCHS_TO_VAL == 0:
@@ -326,7 +324,13 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             print("Evaluando sobre el test wey")
 
         # Evalua si el siguiente epoch se va a entrenar el discriminador
-        avg_disc_loss = total_disc_loss / disc_batches
+        if train_discriminator:
+            disc_batches += 1
+
+        if disc_batches > 0:
+            avg_disc_loss = total_disc_loss / disc_batches
+        else:
+            avg_disc_loss = total_disc_loss
 
         disc_train_next = should_train_discriminator(
             disc_loss=avg_disc_loss,
