@@ -125,8 +125,14 @@ def calc_disc_loss(discriminator, images, stego_images):
     disc_real = discriminator(images)
     disc_fake = discriminator(stego_images.detach())
 
-    loss_real = F.binary_cross_entropy_with_logits(disc_real, torch.ones_like(disc_real))
-    loss_fake = F.binary_cross_entropy_with_logits(disc_fake, torch.zeros_like(disc_fake))
+    real_labels = torch.full_like(disc_real, 0.9)
+    fake_labels = torch.full_like(disc_fake, 0.1)
+
+    loss_real = F.binary_cross_entropy_with_logits(disc_real, real_labels)
+    loss_fake = F.binary_cross_entropy_with_logits(disc_fake, fake_labels)
+
+    print(f"[Disc Real] mean={disc_real.mean().item():.2f} std={disc_real.std().item():.2f}")
+    print(f"[Disc Fake] mean={disc_fake.mean().item():.2f} std={disc_fake.std().item():.2f}")
 
     return loss_real + loss_fake
 
@@ -200,8 +206,8 @@ def log_epoch(writer, epoch, avg_disc_loss, avg_adv_loss, images, stego_images, 
 def save_models(epoch, encoder, discriminator, scaler, checkpoint_dir):
     checkpoint = {
         "epoch": epoch,
-        "encoder_state_dict": encoder._orig_mod.state_dict(),
-        "discriminator_state_dict": discriminator._orig_mod.state_dict(),
+        "encoder_state_dict": getattr(encoder, "_orig_mod", encoder).state_dict(),
+        "discriminator_state_dict": getattr(discriminator, "_orig_mod", discriminator).state_dict(),
         "scaler_state_dict": scaler.state_dict(),
     }
 
@@ -267,6 +273,9 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
         train_model(
             device=device,
             start_epoch=0,
+            warm_up_len=warm_up_len,
+            epochs_to_save=epochs_to_save,
+            epochs_to_val=epochs_to_val,
             num_epochs=num_epochs,
             train_loader=train_loader,
             test_loader=test_loader,
@@ -291,7 +300,8 @@ def to_float(val, default=0.0) -> float:
     return float(val)
 
 def train_model(device, start_epoch, num_epochs, train_loader, test_loader, encoder, discriminator, scaler, scheduler_enc_dec,
-                scheduler_disc, disc_opt, enc_dec_opt, checkpoint_dir, log_dir, disc_loss_target, sharpness):
+                scheduler_disc, disc_opt, enc_dec_opt, checkpoint_dir, log_dir, disc_loss_target, sharpness,
+                warm_up_len, epochs_to_save, epochs_to_val):
     writer = SummaryWriter(log_dir)
     writer.add_text("Entrenamiento", "Iniciado correctamente", 0)
     writer.flush()
@@ -328,21 +338,12 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             global_step += 1
 
         # Termina de entrenar este epoch
-
-
         # Evalua si toca
-        if (epoch + 1) % EPOCHS_TO_VAL == 0:
+        if (epoch + 1) % epochs_to_val == 0:
             evaluate_step(encoder, discriminator, test_loader, writer, device, epoch)
             print("Evaluando sobre el test wey")
 
-        # Evalua si el siguiente epoch se va a entrenar el discriminador
-        if train_discriminator:
-            disc_batches += 1
-
-        if disc_batches > 0:
-            avg_disc_loss = total_disc_loss / disc_batches
-        else:
-            avg_disc_loss = total_disc_loss
+        avg_disc_loss = total_disc_loss / max(1, disc_batches)
 
         disc_train_next = should_train_discriminator(
             disc_loss=avg_disc_loss,
@@ -356,9 +357,10 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             print(f"🧠 [Discriminador]: Paro de entrenar. disc_loss: {avg_disc_loss}")
             train_discriminator = False
         else: # si no se ha entrenado este epoch
-            if epoch > WARM_UP_LEN and disc_train_next:
+            if epoch > warm_up_len and disc_train_next:
                 print("🧠 [Discriminador]: empiezo a entrenar")
                 train_discriminator = True
+                disc_batches += 1
 
         # Log y save
         avg_adv_loss = total_adv_loss / num_batches
@@ -380,7 +382,7 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
         log_model_histograms(writer, encoder, "Encoder", epoch)
         log_model_histograms(writer, discriminator, "Discriminator", epoch)
 
-        if (epoch + 1) % EPOCHS_TO_SAVE == 0:
+        if (epoch + 1) % epochs_to_save == 0:
             save_models(epoch, encoder, discriminator, scaler, checkpoint_dir)
 
         torch.cuda.empty_cache()
