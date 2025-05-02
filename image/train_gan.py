@@ -121,21 +121,28 @@ def get_noisy(image, noise_std):
     else:
         return image
 
-def train_discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images):
+def calc_disc_loss(discriminator, images, stego_images):
     disc_real = discriminator(images)
     disc_fake = discriminator(stego_images.detach())
 
-    disc_loss = BCEWithLogitsLoss(disc_real, torch.ones_like(disc_real)) + \
-                BCEWithLogitsLoss(disc_fake, torch.zeros_like(disc_fake))
+    loss_real = F.binary_cross_entropy_with_logits(disc_real, torch.ones_like(disc_real))
+    loss_fake = F.binary_cross_entropy_with_logits(disc_fake, torch.zeros_like(disc_fake))
 
-    disc_opt.zero_grad()
-    scaler.scale(disc_loss).backward()
-    scaler.step(disc_opt)
-    scaler.update()
+    return loss_real + loss_fake
 
-    # Solo avanzar el scheduler si hubo grads válidos
-    if any(p.grad is not None for p in discriminator.parameters()):
-        scheduler_disc.step()
+def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images, train):
+
+    disc_loss = calc_disc_loss(discriminator=discriminator, images=images, stego_images=stego_images)
+
+    if train:
+        disc_opt.zero_grad()
+        scaler.scale(disc_loss).backward()
+        scaler.step(disc_opt)
+        scaler.update()
+
+        # Solo avanzar el scheduler si hubo grads válidos
+        if any(p.grad is not None for p in discriminator.parameters()):
+            scheduler_disc.step()
 
     return disc_loss
 
@@ -144,10 +151,15 @@ def train_step(epoch, images, messages, encoder, discriminator, train_discrimina
     with amp.autocast("cuda"):
         stego_images = encoder(images, messages)
 
-        if train_discriminator:
-            disc_loss = train_discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images)
-        else:
-            disc_loss = 0  # para no joder la media, el numero de batches tampoco va a subir
+        disc_loss = discriminator_step(
+            discriminator=discriminator,
+            disc_opt=disc_opt,
+            scaler=scaler,
+            scheduler_disc=scheduler_disc,
+            images=images,
+            stego_images=stego_images,
+            train=train_discriminator
+        )
 
         disc_pred = discriminator(stego_images)
         adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
