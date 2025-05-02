@@ -15,32 +15,44 @@ from data_handler import DataHandler
 from mlflow_utils import log_gpu_stats, log_model_histograms, start_mlflow
 
 
-def should_train_discriminator(disc_loss: float, writer, epoch, disc_loss_target: float, sharpness: float) -> bool:
+def should_train_discriminator(
+        disc_loss: float,
+        gen_loss: float,
+        writer,
+        epoch,
+        disc_loss_target: float,
+        sharpness: float,
+        gen_weight: float = 0.5
+) -> bool:
     """
-    Calcula una probabilidad suave de entrenar el discriminador.
+    Decide si entrenar el discriminador teniendo en cuenta tanto su propia pérdida como la del generador.
 
-    - Si sharpness es alto (e.g. 10), el cambio es brusco (como una puerta).
-    - Si sharpness es bajo (e.g. 2), el cambio es progresivo (margen amplio).
+    - `disc_loss_target`: objetivo ideal de la pérdida del discriminador.
+    - `sharpness`: determina la brusquedad de la transición (mayor → más brusca).
+    - `gen_weight`: peso entre 0 y 1 que controla cuánto influye la pérdida del generador.
 
-    Devuelve un número entre 0 y 1.
+    Devuelve True si debe entrenarse, usando una probabilidad sigmoide suave.
     """
 
-    # Normalizamos respecto a los objetivos
+    # Factor de "bajo rendimiento" del discriminador (0: muy mal, 1: perfecto)
     disc_factor = max(0.0, 1.0 - (disc_loss / disc_loss_target))
 
-    # Combinamos (puedes ajustar pesos si quieres)
-    score = disc_factor
+    # Factor de "alto esfuerzo" del generador (0: pérdida baja, 1: pérdida alta)
+    gen_factor = torch.tanh(torch.tensor(gen_loss)).item()  # normaliza a ~[0, 1]
 
-    # Aplicamos función sigmoide controlada por sharpness
+    # Combinamos: si el discriminador va mal y el generador está sufriendo, mejor no entrenar
+    score = gen_weight * gen_factor + (1 - gen_weight) * disc_factor
+
+    # Función sigmoide para suavizar la decisión
     probability = 1 / (1 + math.exp(-sharpness * (score - 0.5)))
-
-    # Asegurar que está en [0, 1]
     probability = min(max(probability, 0.0), 1.0)
 
     writer.add_scalar("Debug/Discriminator_Train_Prob", probability, epoch)
+    writer.add_scalar("Debug/Discriminator_Score", score, epoch)
+    writer.add_scalar("Debug/Discriminator_Factor", disc_factor, epoch)
+    writer.add_scalar("Debug/Generator_Factor", gen_factor, epoch)
 
     return torch.rand(1).item() < probability
-
 
 def evaluate_step(encoder, discriminator, test_loader, writer, device, epoch):
     encoder.eval()
@@ -375,9 +387,11 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             print("Evaluando sobre el test wey")
 
         avg_disc_loss = total_disc_loss / max(1, disc_batches)
+        avg_adv_loss = total_adv_loss / num_batches
 
         disc_train_next = should_train_discriminator(
             disc_loss=avg_disc_loss,
+            gen_loss=avg_adv_loss,
             writer=writer,
             epoch=epoch,
             disc_loss_target=disc_loss_target,
@@ -394,7 +408,6 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
                 disc_batches += 1
 
         # Log y save
-        avg_adv_loss = total_adv_loss / num_batches
         current_lr_enc_dec = scheduler_enc_dec.get_last_lr()[0]
         current_lr_disc = scheduler_disc.get_last_lr()[0]
 
