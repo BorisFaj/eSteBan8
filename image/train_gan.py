@@ -112,7 +112,7 @@ def evaluate_step(encoder, discriminator, test_loader, writer, device, epoch):
     encoder.train()
     discriminator.train()
 
-def get_noisy(image):
+def get_noisy(image, noise_std):
     if noise_std > 0:
         noise = torch.randn_like(image) * noise_std
         _image = image + noise
@@ -122,47 +122,36 @@ def get_noisy(image):
     else:
         return image
 
-def train_step(writer, epoch, images, messages, encoder, discriminator, train_discriminator, disc_opt, scheduler_disc, enc_dec_opt,
+def train_discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images):
+    disc_real = discriminator(images)
+    disc_fake = discriminator(stego_images.detach())
+
+    disc_loss = BCEWithLogitsLoss(disc_real, torch.ones_like(disc_real)) + \
+                BCEWithLogitsLoss(disc_fake, torch.zeros_like(disc_fake))
+
+    disc_opt.zero_grad()
+    scaler.scale(disc_loss).backward()
+    scaler.step(disc_opt)
+    scaler.update()
+
+    # Solo avanzar el scheduler si hubo grads válidos
+    if any(p.grad is not None for p in discriminator.parameters()):
+        scheduler_disc.step()
+
+    return disc_loss
+
+def train_step(epoch, images, messages, encoder, discriminator, train_discriminator, disc_opt, scheduler_disc, enc_dec_opt,
                scheduler_enc_dec, scaler):
 
     # Forward
     with amp.autocast("cuda"):
         stego_images = encoder(images, messages)
 
-        disc_real = discriminator(images)
-        disc_fake = discriminator(stego_images.detach())
-
-        disc_loss = BCEWithLogitsLoss(disc_real, torch.ones_like(disc_real)) + \
-                    BCEWithLogitsLoss(disc_fake, torch.zeros_like(disc_fake))
-
         if train_discriminator:
-            disc_opt.zero_grad()
-            scaler.scale(disc_loss).backward()
-            scaler.step(disc_opt)
-            scaler.update()
+            disc_loss = train_discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images)
+        else:
+            disc_loss = 0  # para no joder la media, el numero de batches tampoco va a subir
 
-            # Solo avanzar el scheduler si hubo grads válidos
-            if any(p.grad is not None for p in discriminator.parameters()):
-                scheduler_disc.step()
-
-            if not should_train_discriminator(disc_loss=disc_loss.item(),
-                                              writer=writer,
-                                              epoch=epoch,
-                                              disc_loss_target=disc_loss_target,
-                                              sharpness=sharpness):
-                print(f"🧠 [Discriminador]: Paro de entrenar. disc_loss: {disc_loss.item()}")
-                train_discriminator = False  # Deja de entrenar
-
-        else:  # si no esta entrenando
-            if epoch > WARM_UP_LEN and should_train_discriminator(disc_loss=disc_loss.item(),
-                                                                  writer=writer,
-                                                                  epoch=epoch,
-                                                                  disc_loss_target=disc_loss_target,
-                                                                  sharpness=sharpness):
-                print("🧠 [Discriminador]: empiezo a entrenar")
-                train_discriminator = True  # Empieza a entrenar
-
-        # Resto de perdidas
         disc_pred = discriminator(stego_images)
         adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
 
@@ -173,7 +162,7 @@ def train_step(writer, epoch, images, messages, encoder, discriminator, train_di
         scaler.update()
         log_gpu_stats(mlflow=mlflow, epoch=epoch)
 
-    return train_discriminator, adv_loss, disc_loss, stego_images
+    return adv_loss, disc_loss, stego_images
 
 def log_epoch(writer, epoch, avg_disc_loss, avg_adv_loss, images, stego_images, global_step,
               current_lr_enc_dec, current_lr_disc):
@@ -210,13 +199,15 @@ def save_models(epoch, encoder, discriminator, scaler, checkpoint_dir):
     path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch + 1}.pt")
     torch.save(checkpoint, path)
     mlflow.log_artifact(path)
+
+    latest_path = os.path.join(checkpoint_dir, f"checkpoint_epoch_latest.pt")
+    torch.save(checkpoint, latest_path)
+    mlflow.log_artifact(latest_path)
     print(f"✅ Modelos guardados correctamente en {path}")
 
-
-# Entrenamiento
 def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channels, image_size, batch_size, num_epochs,
           image_input_res, epochs_to_val, epochs_to_save, noise_std, style_loss_weight, disc_loss_target, sharpness,
-          run_name, checkpoint_dir, log_dir):
+          run_name, checkpoint_dir, log_dir, message_size, pct_start):
 
     train_dataset, train_loader, test_dataset, test_loader = DataHandler(batch_size=batch_size).get()
 
@@ -234,7 +225,6 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
 
     # Scaler
     scaler = amp.GradScaler()
-
 
     # Compilar pesos
     encoder = torch.compile(encoder)
@@ -266,7 +256,9 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
         },)
 
         train_model(
+            device=device,
             start_epoch=0,
+            num_epochs=num_epochs,
             train_loader=train_loader,
             test_loader=test_loader,
             encoder=encoder,
@@ -275,21 +267,23 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
             scheduler_enc_dec=scheduler_enc_dec,
             scheduler_disc=scheduler_disc,
             disc_opt=disc_opt,
+            disc_loss_target=disc_loss_target,
+            sharpness=sharpness,
             enc_dec_opt=enc_dec_opt,
             checkpoint_dir=checkpoint_dir,
             log_dir=log_dir
         )
 
 
-def train_model(start_epoch, train_loader, test_loader, encoder, discriminator, scaler, scheduler_enc_dec, scheduler_disc, disc_opt,
-                enc_dec_opt, checkpoint_dir, log_dir):
+def train_model(device, start_epoch, num_epochs, train_loader, test_loader, encoder, discriminator, scaler, scheduler_enc_dec,
+                scheduler_disc, disc_opt, enc_dec_opt, checkpoint_dir, log_dir, disc_loss_target, sharpness):
     writer = SummaryWriter(log_dir)
     writer.add_text("Entrenamiento", "Iniciado correctamente", 0)
     writer.flush()
 
     global_step = 0
     train_discriminator = False
-    # Empieza la marcha
+
     for epoch in range(start_epoch, num_epochs):
         total_disc_loss = 0
         total_adv_loss = 0
@@ -299,9 +293,8 @@ def train_model(start_epoch, train_loader, test_loader, encoder, discriminator, 
         for i, (images, messages) in enumerate(train_loader):
             images = images.to(device)
 
-            train_discriminator, adv_loss, disc_loss, stego_images = train_step(
+            adv_loss, disc_loss, stego_images = train_step(
                 epoch=epoch,
-                writer=writer,
                 images=images,
                 messages=messages,
                 encoder=encoder,
@@ -319,9 +312,27 @@ def train_model(start_epoch, train_loader, test_loader, encoder, discriminator, 
             num_batches += 1
             global_step += 1
 
-        # Promedio por epoch
+        # Termina de entrenar este epoch
         if train_discriminator:
             disc_batches += 1
+
+        avg_disc_loss = total_disc_loss / disc_batches
+
+        disc_train_next = should_train_discriminator(
+            disc_loss=avg_disc_loss,
+            writer=writer,
+            epoch=epoch,
+            disc_loss_target=disc_loss_target,
+            sharpness=sharpness
+        )
+
+        if train_discriminator and not disc_train_next:
+            print(f"🧠 [Discriminador]: Paro de entrenar. disc_loss: {avg_disc_loss}")
+            train_discriminator = False
+        else: # si no se ha entrenado este epoch
+            if epoch > WARM_UP_LEN and disc_train_next:
+                print("🧠 [Discriminador]: empiezo a entrenar")
+                train_discriminator = True
 
         avg_disc_loss = total_disc_loss / disc_batches
         avg_adv_loss = total_adv_loss / num_batches
@@ -367,50 +378,52 @@ if __name__ == "__main__":
 
     # Parametros de las redes
     WARM_UP_LEN = int(os.getenv("WARM_UP_LEN"))  # numero de epochs que dejo al discriminador sin entrenar
-    image_loss_lambda = float(os.getenv("image_loss_lambda"))  # Parametro para darle algo de tolerancia al image loss
+    IMAGE_LOSS_LAMBDA = float(os.getenv("image_loss_lambda"))  # Parametro para darle algo de tolerancia al image loss
     FREEZE_DISC_LOSS = float(
         os.getenv("FREEZE_DISC_LOSS"))  # loss maximo que alcanza el discriminador antes de ser congelado
-    image_channels = int(os.getenv("image_channels"))
-    image_size = int(os.getenv("image_size"))
-    batch_size = int(os.getenv("batch_size"))
-    num_epochs = int(os.getenv("num_epochs"))
+    IMAGE_CHANNELS = int(os.getenv("image_channels"))
+    IMAGE_SIZE = int(os.getenv("image_size"))
+    BATCH_SIZE = int(os.getenv("batch_size"))
+    NUM_EPOCHS = int(os.getenv("num_epochs"))
     IMAGE_INPUT_RES = int(os.getenv("IMAGE_INPUT_RES"))  # resolucion de la imagen de entrada
     EPOCHS_TO_VAL = int(os.getenv("EPOCHS_TO_VAL"))  # numero de epochs entre validaciones
     EPOCHS_TO_SAVE = int(os.getenv("EPOCHS_TO_SAVE"))  # numero de epochs para guardar el modelo
-    noise_std = float(os.getenv(
+    NOISE_STD = float(os.getenv(
         "noise_std"))  # ruido que se le mete a la imagen generada. Entre 0.01 y 0.05 es razonable para imágenes normalizadas
-    style_loss_weight = float(os.getenv("style_loss_weight"))
-    disc_loss_target = float(os.getenv("disc_loss_target"))
-    sharpness = float(os.getenv("sharpness"))
-    message_size = int(os.getenv("message_size"))
-    pct_start = float(os.getenv("pct_start"))
+    STYLE_LOSS_WEIGHT = float(os.getenv("style_loss_weight"))
+    DISC_LOSS_TARGET = float(os.getenv("disc_loss_target"))
+    SHARPNESS = float(os.getenv("sharpness"))
+    MESSAGE_SIZE = int(os.getenv("message_size"))
+    PCT_START = float(os.getenv("pct_start"))
     RUN_NAME = os.getenv("RUN_NAME")
 
-    checkpoint_dir = os.path.join(os.getenv("checkpoint_dir"), RUN_NAME)
-    log_dir = os.path.join(os.getenv("log_dir"), RUN_NAME)
-    os.makedirs(log_dir, exist_ok=True)
-    os.makedirs(checkpoint_dir, exist_ok=True)
+    CHECKPOINT_DIR = os.path.join(os.getenv("checkpoint_dir"), RUN_NAME)
+    LOG_DIR = os.path.join(os.getenv("log_dir"), RUN_NAME)
+    os.makedirs(LOG_DIR, exist_ok=True)
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     start(
-        device=device,
+        device=DEVICE,
         warm_up_len=WARM_UP_LEN,
-        image_loss_lambda=image_loss_lambda,
+        image_loss_lambda=IMAGE_LOSS_LAMBDA,
         freeze_disc_loss=FREEZE_DISC_LOSS,
-        image_channels=image_channels,
-        image_size=image_size,
-        batch_size=batch_size,
-        num_epochs=num_epochs,
+        image_channels=IMAGE_CHANNELS,
+        image_size=IMAGE_SIZE,
+        batch_size=BATCH_SIZE,
+        num_epochs=NUM_EPOCHS,
         image_input_res=IMAGE_INPUT_RES,
         epochs_to_val=EPOCHS_TO_VAL,
         epochs_to_save=EPOCHS_TO_SAVE,
-        noise_std=noise_std,
-        style_loss_weight=style_loss_weight,
-        disc_loss_target=disc_loss_target,
-        sharpness=message_size,
+        noise_std=NOISE_STD,
+        style_loss_weight=STYLE_LOSS_WEIGHT,
+        disc_loss_target=DISC_LOSS_TARGET,
+        sharpness=SHARPNESS,
         run_name=RUN_NAME,
-        checkpoint_dir=checkpoint_dir,
-        log_dir=log_dir
+        checkpoint_dir=CHECKPOINT_DIR,
+        log_dir=LOG_DIR,
+        message_size=MESSAGE_SIZE,
+        pct_start=PCT_START
     )
 
