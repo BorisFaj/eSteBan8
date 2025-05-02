@@ -8,7 +8,7 @@ from transformers import AutoTokenizer, AutoModel
 from datasets import load_dataset
 from torch.utils.tensorboard import SummaryWriter
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
-from lstm_attention import LSTMAttention
+from transformer_decoder import TransformerDecoder
 import mlflow
 import mlflow.pytorch
 from dotenv import load_dotenv
@@ -41,7 +41,13 @@ sos_token_id = tokenizer.cls_token_id
 pad_token_id = tokenizer.pad_token_id
 
 bert = AutoModel.from_pretrained("distilbert-base-uncased").to(DEVICE)
-decoder = LSTMAttention(embedding_dim=EMBED_DIM, hidden_dim=HIDDEN_DIM, vocab_size=vocab_size, max_len=MAX_LEN).to(DEVICE)
+decoder = TransformerDecoder(
+    embedding_dim=EMBED_DIM,
+    vocab_size=vocab_size,
+    max_len=MAX_LEN
+).to(DEVICE)
+
+decoder = torch.compile(decoder)
 
 optimizer = torch.optim.Adam(decoder.parameters(), lr=1e-4)
 criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id, label_smoothing=0.1)
@@ -90,13 +96,12 @@ def start_mlflow(params: dict, run_name: str):
 def train_step(batch):
     input_ids = batch["input_ids"].to(DEVICE)
     targets = input_ids[:, 1:]
-
     attention_mask = (input_ids != pad_token_id).long()
 
     with torch.no_grad():
-        z = bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state[:, 0, :]  # [CLS]
+        memory = bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state  # shape: (B, seq_len, 768)
 
-    outputs = decoder(z, sos_token_id=sos_token_id, targets=targets, generate=False, teacher_forcing_ratio=0.7)
+    outputs = decoder(memory, sos_token_id=sos_token_id, targets=targets, generate=False, teacher_forcing_ratio=0.7)
     targets = targets[:, :outputs.size(1)]
 
     loss = criterion(outputs.reshape(-1, vocab_size), targets.reshape(-1))
@@ -107,6 +112,7 @@ def train_step(batch):
     optimizer.step()
 
     return loss.item()
+
 
 def validate_step():
     decoder.eval()
@@ -120,12 +126,11 @@ def validate_step():
     for example in sample_batch:
         input_text = tokenizer.decode(example["input_ids"], skip_special_tokens=True)
         val_input_ids = example["input_ids"].unsqueeze(0).to(DEVICE)
-
         attention_mask = (val_input_ids != pad_token_id).long()
 
         with torch.no_grad():
-            z = bert(input_ids=val_input_ids, attention_mask=attention_mask).last_hidden_state[:, 0, :]
-            output_logits = decoder(z, generate=True, sos_token_id=sos_token_id)
+            memory = bert(input_ids=val_input_ids, attention_mask=attention_mask).last_hidden_state
+            output_logits = decoder(memory, generate=True, sos_token_id=sos_token_id)
             output_ids = torch.argmax(output_logits, dim=-1)
             decoded_text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
 
@@ -148,18 +153,43 @@ def validate_step():
 
     return avg_bleu, avg_rouge1, avg_rougel
 
+def save_checkpoint(path, epoch, decoder, optimizer=None, scheduler=None):
+    state = {
+        'epoch': epoch,
+        'decoder_state_dict': decoder.state_dict()
+    }
+    if optimizer:
+        state['optimizer_state_dict'] = optimizer.state_dict()
+    if scheduler:
+        state['scheduler_state_dict'] = scheduler.state_dict()
+
+    torch.save(state, path)
+    print(f"💾 Checkpoint guardado: {path}")
+
+def load_checkpoint(path, decoder, optimizer=None, scheduler=None, device='cpu'):
+    if not os.path.exists(path):
+        print(f"⚠️ No existe el checkpoint: {path}")
+        return 1  # epoch de inicio
+
+    checkpoint = torch.load(path, map_location=device)
+    decoder.load_state_dict(checkpoint['decoder_state_dict'])
+
+    if optimizer and 'optimizer_state_dict' in checkpoint:
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+    if scheduler and 'scheduler_state_dict' in checkpoint:
+        scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+
+    print(f"✅ Checkpoint cargado: {path}")
+    return checkpoint['epoch'] + 1
+
 # --- Entrenamiento principal ---
 
 start_epoch = 1
 latest_ckpt = sorted([f for f in os.listdir(CKPT_DIR) if f.endswith(".pt")])
 if latest_ckpt:
     path = os.path.join(CKPT_DIR, latest_ckpt[-1])
-    checkpoint = torch.load(path)
-    decoder.load_state_dict(checkpoint['decoder_state_dict'])
-    optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-    start_epoch = checkpoint['epoch'] + 1
-    print(f"✅ Reanudado desde {path}")
+    load_checkpoint(load_checkpoint, decoder, optimizer, scheduler)
+
 
 mlflow = start_mlflow({"BATCH_SIZE": BATCH_SIZE,
                        "EMBED_DIM": EMBED_DIM,
@@ -211,11 +241,13 @@ for epoch in range(start_epoch, EPOCHS + 1):
 
     # Checkpoint
     if epoch % SAVE_EVERY == 0 or epoch == EPOCHS:
-        torch.save({
-            'epoch': epoch,
-            'decoder_state_dict': decoder.state_dict(),
-            'optimizer_state_dict': optimizer.state_dict(),
-            'scheduler_state_dict': scheduler.state_dict(),
-        }, os.path.join(CKPT_DIR, f"decoder_epoch{epoch}.pt"))
+        save_checkpoint(
+            path=os.path.join(CKPT_DIR, f"decoder_epoch{epoch}.pt"),
+            epoch=epoch,
+            decoder=decoder,
+            optimizer=optimizer,
+            scheduler=scheduler
+        )
+        save_checkpoint(os.path.join(CKPT_DIR, "decoder_latest.pt"), epoch, decoder, optimizer, scheduler)
 
 writer.close()
