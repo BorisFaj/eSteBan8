@@ -122,17 +122,21 @@ def get_noisy(image, noise_std):
         return image
 
 def gradient_magnitude(img):
-    # Filtros Sobel en X e Y
+    # Expandimos los filtros Sobel para cada canal (C=3)
+    C = img.shape[1]
     sobel_x = torch.tensor([[1, 0, -1],
                             [2, 0, -2],
-                            [1, 0, -1]], dtype=torch.float32).view(1, 1, 3, 3)
+                            [1, 0, -1]], dtype=torch.float32).repeat(C, 1, 1, 1)
     sobel_y = torch.tensor([[1, 2, 1],
                             [0, 0, 0],
-                            [-1, -2, -1]], dtype=torch.float32).view(1, 1, 3, 3)
+                            [-1, -2, -1]], dtype=torch.float32).repeat(C, 1, 1, 1)
 
-    # Suponemos imagenes normalizadas en [-1, 1], y de shape (B, C, H, W)
-    gx = F.conv2d(img, sobel_x.to(img.device), padding=1, groups=img.shape[1])
-    gy = F.conv2d(img, sobel_y.to(img.device), padding=1, groups=img.shape[1])
+    # Asegúrate de que estén en el mismo dispositivo
+    sobel_x = sobel_x.to(img.device)
+    sobel_y = sobel_y.to(img.device)
+
+    gx = F.conv2d(img, sobel_x, padding=1, groups=C)
+    gy = F.conv2d(img, sobel_y, padding=1, groups=C)
     return torch.sqrt(gx ** 2 + gy ** 2)
 
 def sobel_loss(stego, original):
