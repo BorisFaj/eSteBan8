@@ -1,9 +1,9 @@
 import torch
-import re
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.tensorboard import SummaryWriter
 from torchvision.utils import make_grid
 import torch.nn.functional as F
+from torch.nn import BCEWithLogitsLoss
 from encoder import Encoder
 from discriminator import Discriminator
 from torch import amp
@@ -29,7 +29,7 @@ def should_train_discriminator(disc_loss: float, writer, epoch, disc_loss_target
     disc_factor = max(0.0, 1.0 - (disc_loss / disc_loss_target))
 
     # Combinamos (puedes ajustar pesos si quieres)
-    score = 0.5 * disc_factor
+    score = disc_factor
 
     # Aplicamos función sigmoide controlada por sharpness
     probability = 1 / (1 + math.exp(-sharpness * (score - 0.5)))
@@ -123,7 +123,7 @@ def get_noisy(image):
         return image
 
 def train_step(writer, epoch, images, messages, encoder, discriminator, train_discriminator, disc_opt, scheduler_disc, enc_dec_opt,
-               scheduler_enc_dec, total_disc_loss, scaler):
+               scheduler_enc_dec, scaler):
 
     # Forward
     with amp.autocast("cuda"):
@@ -132,8 +132,8 @@ def train_step(writer, epoch, images, messages, encoder, discriminator, train_di
         disc_real = discriminator(images)
         disc_fake = discriminator(stego_images.detach())
 
-        disc_loss = F.mse_loss(disc_real, torch.ones_like(disc_real)) + \
-                    F.mse_loss(disc_fake, torch.zeros_like(disc_fake))
+        disc_loss = BCEWithLogitsLoss(disc_real, torch.ones_like(disc_real)) + \
+                    BCEWithLogitsLoss(disc_fake, torch.zeros_like(disc_fake))
 
         if train_discriminator:
             disc_opt.zero_grad()
@@ -145,14 +145,12 @@ def train_step(writer, epoch, images, messages, encoder, discriminator, train_di
             if any(p.grad is not None for p in discriminator.parameters()):
                 scheduler_disc.step()
 
-            total_disc_loss += disc_loss.item()
-
             if not should_train_discriminator(disc_loss=disc_loss.item(),
                                               writer=writer,
                                               epoch=epoch,
                                               disc_loss_target=disc_loss_target,
                                               sharpness=sharpness):
-                print("🧠 [Discriminador]: Paro de entrenar")
+                print(f"🧠 [Discriminador]: Paro de entrenar. disc_loss: {disc_loss.item()}")
                 train_discriminator = False  # Deja de entrenar
 
         else:  # si no esta entrenando
@@ -175,7 +173,7 @@ def train_step(writer, epoch, images, messages, encoder, discriminator, train_di
         scaler.update()
         log_gpu_stats(mlflow=mlflow, epoch=epoch)
 
-    return train_discriminator, adv_loss, stego_images
+    return train_discriminator, adv_loss, disc_loss, stego_images
 
 def log_epoch(writer, epoch, avg_disc_loss, avg_adv_loss, images, stego_images, global_step,
               current_lr_enc_dec, current_lr_disc):
@@ -208,36 +206,11 @@ def save_models(epoch, encoder, discriminator, scaler, checkpoint_dir):
         "discriminator_state_dict": discriminator._orig_mod.state_dict(),
         "scaler_state_dict": scaler.state_dict(),
     }
+
     path = os.path.join(checkpoint_dir, f"checkpoint_epoch_{epoch + 1}.pt")
     torch.save(checkpoint, path)
     mlflow.log_artifact(path)
     print(f"✅ Modelos guardados correctamente en {path}")
-
-def load_checkpoint(checkpoint_dir, encoder, discriminator, scaler):
-    """
-    Carga el último checkpoint desde disco para modelos compilados.
-    Asume que los modelos fueron guardados con `. _orig_mod.state_dict()`
-    y que los nuevos modelos están compilados.
-    """
-    checkpoints = [f for f in os.listdir(checkpoint_dir) if f.startswith("checkpoint_epoch_") and f.endswith(".pt")]
-    if not checkpoints:
-        print("⚠️ No se encontró ningún checkpoint. Entrenamiento comenzará desde cero.")
-        return 0, encoder, discriminator, scaler
-
-    # Buscar el último checkpoint por número de epoch
-    checkpoints.sort(key=lambda f: int(re.findall(r"\d+", f)[-1]))
-    last_checkpoint = checkpoints[-1]
-    path = os.path.join(checkpoint_dir, last_checkpoint)
-
-    print(f"🔁 Cargando checkpoint compilado desde {path}")
-    checkpoint = torch.load(path, map_location="cuda" if torch.cuda.is_available() else "cpu")
-
-    encoder.load_state_dict(checkpoint["encoder_state_dict"])  # modelos ya compilados
-    discriminator.load_state_dict(checkpoint["discriminator_state_dict"])
-    scaler.load_state_dict(checkpoint["scaler_state_dict"])
-    epoch = checkpoint["epoch"] + 1  # empezamos en el siguiente
-
-    return epoch, encoder, discriminator, scaler
 
 
 # Entrenamiento
@@ -262,14 +235,10 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
     # Scaler
     scaler = amp.GradScaler()
 
+
     # Compilar pesos
     encoder = torch.compile(encoder)
     discriminator = torch.compile(discriminator)
-
-    # Resume checkpoint
-    start_epoch, encoder, discriminator, scaler = load_checkpoint(
-        checkpoint_dir, encoder, discriminator, scaler
-    )
 
     # Config MLFlow
     _ = start_mlflow()
@@ -297,7 +266,7 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
         },)
 
         train_model(
-            start_epoch=start_epoch,
+            start_epoch=0,
             train_loader=train_loader,
             test_loader=test_loader,
             encoder=encoder,
@@ -319,18 +288,18 @@ def train_model(start_epoch, train_loader, test_loader, encoder, discriminator, 
     writer.flush()
 
     global_step = 0
+    train_discriminator = False
     # Empieza la marcha
     for epoch in range(start_epoch, num_epochs):
         total_disc_loss = 0
         total_adv_loss = 0
         num_batches = 0
         disc_batches = 0
-        train_discriminator = False
 
         for i, (images, messages) in enumerate(train_loader):
             images = images.to(device)
 
-            train_discriminator, adv_loss, stego_images = train_step(
+            train_discriminator, adv_loss, disc_loss, stego_images = train_step(
                 epoch=epoch,
                 writer=writer,
                 images=images,
@@ -342,21 +311,19 @@ def train_model(start_epoch, train_loader, test_loader, encoder, discriminator, 
                 scheduler_disc=scheduler_disc,
                 enc_dec_opt=enc_dec_opt,
                 scheduler_enc_dec=scheduler_enc_dec,
-                total_disc_loss=total_disc_loss,
                 scaler=scaler
             )
 
             total_adv_loss += adv_loss.item()
+            total_disc_loss += disc_loss.item()
             num_batches += 1
             global_step += 1
 
         # Promedio por epoch
         if train_discriminator:
             disc_batches += 1
-            avg_disc_loss = total_disc_loss / disc_batches
-        else:
-            avg_disc_loss = 0
 
+        avg_disc_loss = total_disc_loss / disc_batches
         avg_adv_loss = total_adv_loss / num_batches
 
         if (epoch + 1) % EPOCHS_TO_VAL == 0:
