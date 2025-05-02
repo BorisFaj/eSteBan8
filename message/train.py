@@ -77,8 +77,7 @@ def validate_step(writer, epoch, bert, decoder, tokenizer, pad_token_id, sos_tok
 
         with torch.no_grad():
             z = bert(input_ids=val_input_ids, attention_mask=attention_mask).last_hidden_state
-            output_logits = decoder(z, generate=True, sos_token_id=sos_token_id)
-            output_ids = torch.argmax(output_logits, dim=-1)
+            output_ids = decoder(z, generate=True, sos_token_id=sos_token_id, eos_token_id=tokenizer.eos_token_id)
             decoded_text = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
 
         ref = [input_text.split()]

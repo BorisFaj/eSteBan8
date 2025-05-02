@@ -33,7 +33,7 @@ class TransformerDecoder(nn.Module):
         self.output_proj = nn.Linear(embedding_dim, vocab_size)
         self.max_len = max_len
 
-    def forward(self, memory, sos_token_id, targets=None, generate=False, teacher_forcing_ratio=1.0):
+    def forward(self, memory, sos_token_id, targets=None, generate=False, teacher_forcing_ratio=1.0, eos_token_id=None):
         B = memory.size(0)
 
         if generate:
@@ -48,9 +48,12 @@ class TransformerDecoder(nn.Module):
                 next_token = next_token_logits.argmax(-1).unsqueeze(1)
                 generated = torch.cat([generated, next_token], dim=1)
 
-            final_embed = self.embedding(generated)
-            final_embed = self.positional_encoding(final_embed)
-            return self.output_proj(final_embed)
+                # Early stopping si todos generaron <eos>
+                if eos_token_id is not None:
+                    if (next_token == eos_token_id).all():
+                        break
+
+            return generated  # ⬅️ devuelve los IDs
 
         else:
             if targets is None:
