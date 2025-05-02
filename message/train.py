@@ -221,13 +221,13 @@ def train_model(device, tokenizer, train_loader, val_dataset, decoder, optimizer
 
     writer.close()
 
-def start(device, batch_size, run_name, checkpoint_dir, log_dir, embed_dim, max_len, epochs,
-          validate_every, save_every):
+def start(device, batch_size, run_name, checkpoint_dir, log_dir, embed_dim, epochs,
+          validate_every, save_every, max_token_len, max_sencence_sample_len):
 
     tokenizer = AutoTokenizer.from_pretrained("distilbert-base-uncased")
     vocab_size = tokenizer.vocab_size
 
-    decoder = TransformerDecoder(embedding_dim=embed_dim, vocab_size=vocab_size, max_len=max_len).to(
+    decoder = TransformerDecoder(embedding_dim=embed_dim, vocab_size=vocab_size, max_len=max_token_len).to(
         device)
 
     optimizer = torch.optim.Adam(decoder.parameters(), lr=1e-4)
@@ -239,13 +239,13 @@ def start(device, batch_size, run_name, checkpoint_dir, log_dir, embed_dim, max_
     dataset = raw_dataset.train_test_split(test_size=0.1, seed=42)
     train_dataset, val_dataset = dataset["train"], dataset["test"]
 
-    train_dataset = train_dataset.filter(lambda x: x["text"].strip() != "" and 10 < len(x["text"].split()) < 60)
-    val_dataset = val_dataset.filter(lambda x: x["text"].strip() != "" and 10 < len(x["text"].split()) < 60)
+    train_dataset = train_dataset.filter(lambda x: x["text"].strip() != "" and 10 < len(x["text"].split()) < max_sencence_sample_len)
+    val_dataset = val_dataset.filter(lambda x: x["text"].strip() != "" and 10 < len(x["text"].split()) < max_sencence_sample_len)
 
     train_dataset = train_dataset.map(
-        lambda x: {"input_ids": tokenizer.encode(x["text"], truncation=True, max_length=max_len, padding="max_length")})
+        lambda x: {"input_ids": tokenizer.encode(x["text"], truncation=True, max_length=max_token_len, padding="max_length")})
     val_dataset = val_dataset.map(
-        lambda x: {"input_ids": tokenizer.encode(x["text"], truncation=True, max_length=max_len, padding="max_length")})
+        lambda x: {"input_ids": tokenizer.encode(x["text"], truncation=True, max_length=max_token_len, padding="max_length")})
 
     train_dataset.set_format(type="torch", columns=["input_ids"])
     val_dataset.set_format(type="torch", columns=["input_ids"])
@@ -258,7 +258,8 @@ def start(device, batch_size, run_name, checkpoint_dir, log_dir, embed_dim, max_
         mlflow.log_params({
             "batch_size": batch_size,
             "embed_dim": embed_dim,
-            "max_len": max_len,
+            "max_token_len": max_token_len,
+            "max_sencence_sample_len": max_sencence_sample_len,
             "epochs": epochs,
             "validate_every": validate_every,
             "save_every": save_every
@@ -290,7 +291,8 @@ if __name__ == "__main__":
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     BATCH_SIZE = int(os.getenv("batch_size"))
     EMBED_DIM = int(os.getenv("message_size"))
-    MAX_LEN = 60
+    MAX_TOKEN_LEN = int(os.getenv("MAX_TOKEN_LEN"))
+    MAX_SENCTENCE_SAMPLE_LEN = int(os.getenv("MAX_SENCTENCE_SAMPLE_LEN"))
     EPOCHS = int(os.getenv("num_epochs"))
 
     VALIDATE_EVERY = int(os.getenv("EPOCHS_TO_VAL"))  # numero de epochs entre validaciones
@@ -309,7 +311,8 @@ if __name__ == "__main__":
         checkpoint_dir=CHECKPOINT_DIR,
         log_dir=LOG_DIR,
         embed_dim=EMBED_DIM,
-        max_len=MAX_LEN,
+        max_token_len=MAX_TOKEN_LEN,
+        max_sencence_sample_len=MAX_SENCTENCE_SAMPLE_LEN,
         epochs=EPOCHS,
         validate_every=VALIDATE_EVERY,
         save_every=SAVE_EVERY
