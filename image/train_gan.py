@@ -178,6 +178,8 @@ def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, 
     if train:
         disc_opt.zero_grad()
         scaler.scale(disc_loss).backward()
+        scaler.unscale_(disc_opt)
+        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
         scaler.step(disc_opt)
 
         if any(p.grad is not None for p in discriminator.parameters()):
@@ -215,6 +217,8 @@ def train_step(epoch, images, messages, encoder, discriminator, train_discrimina
 
         enc_dec_opt.zero_grad()
         scaler.scale(total_loss).backward()
+        scaler.unscale_(enc_dec_opt)
+        torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=1.0)
         scaler.step(enc_dec_opt)
         scheduler_enc_dec.step()
         scaler.update()
