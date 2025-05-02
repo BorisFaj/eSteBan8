@@ -142,8 +142,6 @@ def train_discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, im
 
 def train_step(epoch, images, messages, encoder, discriminator, train_discriminator, disc_opt, scheduler_disc, enc_dec_opt,
                scheduler_enc_dec, scaler):
-
-    # Forward
     with amp.autocast("cuda"):
         stego_images = encoder(images, messages)
 
@@ -274,6 +272,12 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
             log_dir=log_dir
         )
 
+def to_float(val, default=0.0) -> float:
+    if val is None:
+        return default
+    if isinstance(val, torch.Tensor):
+        return float(val.item())
+    return float(val)
 
 def train_model(device, start_epoch, num_epochs, train_loader, test_loader, encoder, discriminator, scaler, scheduler_enc_dec,
                 scheduler_disc, disc_opt, enc_dec_opt, checkpoint_dir, log_dir, disc_loss_target, sharpness):
@@ -307,8 +311,8 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
                 scaler=scaler
             )
 
-            total_adv_loss += adv_loss.item()
-            total_disc_loss += disc_loss.item()
+            total_adv_loss += to_float(adv_loss)
+            total_disc_loss += to_float(disc_loss)
             num_batches += 1
             global_step += 1
 
@@ -316,6 +320,12 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
         if train_discriminator:
             disc_batches += 1
 
+        # Evalua si toca
+        if (epoch + 1) % EPOCHS_TO_VAL == 0:
+            evaluate_step(encoder, discriminator, test_loader, writer, device, epoch)
+            print("Evaluando sobre el test wey")
+
+        # Evalua si el siguiente epoch se va a entrenar el discriminador
         avg_disc_loss = total_disc_loss / disc_batches
 
         disc_train_next = should_train_discriminator(
@@ -334,14 +344,8 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
                 print("🧠 [Discriminador]: empiezo a entrenar")
                 train_discriminator = True
 
-        avg_disc_loss = total_disc_loss / disc_batches
+        # Log y save
         avg_adv_loss = total_adv_loss / num_batches
-
-        if (epoch + 1) % EPOCHS_TO_VAL == 0:
-            evaluate_step(encoder, discriminator, test_loader, writer, device, epoch)
-            print("Evaluando sobre el test wey")
-
-
         current_lr_enc_dec = scheduler_enc_dec.get_last_lr()[0]
         current_lr_disc = scheduler_disc.get_last_lr()[0]
 
