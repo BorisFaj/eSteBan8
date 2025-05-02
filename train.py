@@ -90,16 +90,16 @@ def gradient_magnitude(img):
     gy = F.conv2d(img, sobel_y, padding=1, groups=C)
     return torch.sqrt(gx ** 2 + gy ** 2)
 
-def sobel_loss(stego, original):
-    grad_stego = gradient_magnitude(stego)
+def sobel_loss(fake, original):
+    grad_fake = gradient_magnitude(fake)
     grad_orig = gradient_magnitude(original)
-    return F.l1_loss(grad_stego, grad_orig)
+    return F.l1_loss(grad_fake, grad_orig)
 
 def calc_disc_loss(device, generator, discriminator, real_img, fake_img, criterion):
     valid = torch.ones((fake_img.size(0), 1), device=device)
     fake = torch.zeros((fake_img.size(0), 1), device=device)
 
-    with torch.cuda.amp.autocast():
+    with torch.amp.autocast(device_type="cuda"):
         fake_img = generator(fake_img)
         real_pred = discriminator(real_img)
         fake_pred = discriminator(fake_img.detach())
@@ -157,13 +157,13 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
             valid = torch.ones((x.size(0), 1), device=device)
             fake = torch.zeros((x.size(0), 1), device=device)
 
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type="cuda"):
                 fake_img = generator(x)
                 real_pred = discriminator(real_img)
                 fake_pred = discriminator(fake_img.detach())
                 loss_disc = criterion(real_pred, valid) + criterion(fake_pred, fake)
 
-            with torch.cuda.amp.autocast():
+            with torch.amp.autocast(device_type="cuda"):
                 fake_pred = discriminator(fake_img)
                 loss_gen = criterion(fake_pred, valid)
 
@@ -184,12 +184,12 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
         # Imágenes
         real_images_01 = (real_img + 1) / 2
         fake_images_01 = (fake_img + 1) / 2
-        img_grid_real = make_grid(real_images_01[:8].cpu(), nrow=4, normalize=True)
-        img_grid_stego = make_grid(fake_images_01[:8].cpu(), nrow=4, normalize=True)
+        img_grid_real = make_grid(real_images_01[:8].cpu().detach(), nrow=4, normalize=True)
+        img_grid_fake = make_grid(fake_images_01[:8].cpu(), nrow=4, normalize=True)
         writer.add_image("Test/Images/Real", img_grid_real, epoch)
-        writer.add_image("Test/Images/Stego", img_grid_stego, epoch)
+        writer.add_image("Test/Images/Fake", img_grid_fake, epoch)
 
-        # Debug de diferencias entre stego-images
+        # Debug de diferencias entre fake-images
         img = real_img[:2]  # coge dos imágenes del batch
         _fake = fake_img[:2]
 
@@ -214,7 +214,7 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
         x, real_img = x.to(device), real_img.to(device)
         loss_disc, fake_img, valid = discriminator_step(device, generator, criterion, discriminator, opt_disc, scaler, real_img, x, train_discriminator)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast(device_type="cuda"):
             fake_pred = discriminator(fake_img)
             loss_gen = criterion(fake_pred, valid)
 
@@ -231,7 +231,7 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
     avg_disc_loss = total_loss_disc / len(dataloader)
     avg_gen_loss = total_loss_gen / len(dataloader)
 
-    return avg_disc_loss, avg_gen_loss, fake_img
+    return avg_disc_loss, avg_gen_loss, fake_img.detach().cpu()
 
 def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, discriminator, train_loader, criterion,
                 opt_disc, opt_gen, checkpoint_dir, epochs_to_val, test_loader, disc_loss_target, sharpness, warm_up_len,
@@ -279,7 +279,7 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
         )
 
         # Visualización
-        grid = make_grid((fake_img[:8] + 1) / 2, nrow=4)
+        grid = make_grid((fake_img[:8].detach().cpu() + 1) / 2, nrow=4)
         writer.add_image("Fake", grid, epoch)
 
         log_model_histograms(writer, generator, "Generator", epoch)
@@ -304,17 +304,20 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
     torch.manual_seed(1984)
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=4)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
 
     generator = Generator(image_channels=image_channels, image_size=image_size).to(device)
     discriminator = Discriminator(img_channels=image_channels).to(device)
+
+    generator = torch.compile(generator)
+    discriminator = torch.compile(discriminator)
 
     opt_gen = torch.optim.Adam(generator.parameters(), lr=2e-4, betas=(0.5, 0.999))
     opt_disc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.5, 0.999))
 
     criterion = nn.BCEWithLogitsLoss()
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = torch.amp.GradScaler()
 
     # Config MLFlow
     _ = start_mlflow()
