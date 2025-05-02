@@ -47,7 +47,7 @@ decoder = TransformerDecoder(
     max_len=MAX_LEN
 ).to(DEVICE)
 
-decoder = torch.compile(decoder)
+# decoder = torch.compile(decoder)
 
 optimizer = torch.optim.Adam(decoder.parameters(), lr=1e-4)
 criterion = nn.CrossEntropyLoss(ignore_index=pad_token_id, label_smoothing=0.1)
@@ -95,7 +95,7 @@ def start_mlflow(params: dict, run_name: str):
 
 def train_step(batch):
     input_ids = batch["input_ids"].to(DEVICE)
-    targets = input_ids[:, 1:]
+    targets = input_ids[:, 1:].clone()
     attention_mask = (input_ids != pad_token_id).long()
 
     with torch.no_grad():
@@ -107,7 +107,12 @@ def train_step(batch):
     loss = criterion(outputs.reshape(-1, vocab_size), targets.reshape(-1))
 
     optimizer.zero_grad()
-    loss.backward()
+    try:
+        loss.backward()
+    except RuntimeError as e:
+        print(f"🔴 Error en backward(): {e}")
+        raise
+
     torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=1.0)
     optimizer.step()
 
@@ -188,8 +193,7 @@ start_epoch = 1
 latest_ckpt = sorted([f for f in os.listdir(CKPT_DIR) if f.endswith(".pt")])
 if latest_ckpt:
     path = os.path.join(CKPT_DIR, latest_ckpt[-1])
-    load_checkpoint(load_checkpoint, decoder, optimizer, scheduler)
-
+    start_epoch = load_checkpoint(path, decoder, optimizer, scheduler)
 
 mlflow = start_mlflow({"BATCH_SIZE": BATCH_SIZE,
                        "EMBED_DIM": EMBED_DIM,
