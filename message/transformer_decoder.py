@@ -1,20 +1,35 @@
 import torch
 import torch.nn as nn
+import math
+
+class SinusoidalPositionalEncoding(nn.Module):
+    def __init__(self, d_model, max_len=5000):
+        super().__init__()
+        pe = torch.zeros(max_len, d_model)
+        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
+
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+        pe = pe.unsqueeze(0)  # (1, max_len, d_model)
+        self.register_buffer('pe', pe)
+
+    def forward(self, x):
+        return x + self.pe[:, :x.size(1), :]
 
 class TransformerDecoder(nn.Module):
     def __init__(self, embedding_dim, vocab_size, max_len, num_layers=6, nhead=8, dim_feedforward=2048, dropout=0.1):
         super().__init__()
         self.embedding = nn.Embedding(vocab_size, embedding_dim)
-        self.positional_encoding = nn.Parameter(torch.randn(1, max_len, embedding_dim))
-
-        decoder_layer = nn.TransformerDecoderLayer(
+        self.positional_encoding = SinusoidalPositionalEncoding(embedding_dim, max_len)
+        self.decoder_layer = nn.TransformerDecoderLayer(
             d_model=embedding_dim,
             nhead=nhead,
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True
         )
-        self.decoder = nn.TransformerDecoder(decoder_layer, num_layers=num_layers)
+        self.decoder = nn.TransformerDecoder(self.decoder_layer, num_layers=num_layers)
         self.output_proj = nn.Linear(embedding_dim, vocab_size)
         self.max_len = max_len
 
@@ -24,7 +39,8 @@ class TransformerDecoder(nn.Module):
         if generate:
             generated = torch.full((B, 1), sos_token_id, dtype=torch.long, device=memory.device)
             for _ in range(self.max_len - 1):
-                tgt_embed = self.embedding(generated) + self.positional_encoding[:, :generated.size(1), :]
+                tgt_embed = self.embedding(generated)
+                tgt_embed = self.positional_encoding(tgt_embed)
                 tgt_mask = nn.Transformer.generate_square_subsequent_mask(generated.size(1)).to(memory.device)
 
                 output = self.decoder(tgt=tgt_embed, memory=memory, tgt_mask=tgt_mask)
@@ -32,15 +48,16 @@ class TransformerDecoder(nn.Module):
                 next_token = next_token_logits.argmax(-1).unsqueeze(1)
                 generated = torch.cat([generated, next_token], dim=1)
 
-            return self.output_proj(self.embedding(generated) + self.positional_encoding[:, :generated.size(1), :])
+            final_embed = self.embedding(generated)
+            final_embed = self.positional_encoding(final_embed)
+            return self.output_proj(final_embed)
 
         else:
             if targets is None:
                 raise ValueError("Targets required when generate=False")
-            tgt_inputs = targets  # usar directamente los targets (teacher forcing)
-            pos_enc = self.positional_encoding[:, :tgt_inputs.size(1), :].clone().detach()
-            tgt_embed = self.embedding(tgt_inputs) + pos_enc
-            tgt_mask = nn.Transformer.generate_square_subsequent_mask(tgt_inputs.size(1)).to(memory.device)
+            tgt_embed = self.embedding(targets)
+            tgt_embed = self.positional_encoding(tgt_embed)
+            tgt_mask = nn.Transformer.generate_square_subsequent_mask(targets.size(1)).to(memory.device)
 
             output = self.decoder(tgt=tgt_embed, memory=memory, tgt_mask=tgt_mask)
             return self.output_proj(output)
