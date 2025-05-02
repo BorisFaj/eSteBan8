@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from torch.utils.data import DataLoader
+from world.data_handler import PairedImageDataset
 from torchvision import transforms
 from torchvision.utils import make_grid
 from torch.utils.tensorboard import SummaryWriter
@@ -10,6 +10,7 @@ from tqdm import tqdm
 from world.discriminator import Discriminator
 from world.generator import Generator
 from image.mlflow_utils import log_gpu_stats, log_model_histograms, start_mlflow
+from torch.utils.data import Dataset, DataLoader, random_split
 from dotenv import load_dotenv
 import math
 import torch.nn.functional as F
@@ -113,6 +114,8 @@ def discriminator_step(device, generator, criterion, discriminator, disc_opt, sc
     if train:
         disc_opt.zero_grad()
         scaler.scale(disc_loss).backward()
+        scaler.unscale_(disc_opt)
+        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
         scaler.step(disc_opt)
         scaler.update()
 
@@ -230,7 +233,7 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
 
     return avg_disc_loss, avg_gen_loss, fake_img
 
-def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, discriminator, dataloader, criterion,
+def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, discriminator, train_loader, criterion,
                 opt_disc, opt_gen, checkpoint_dir, epochs_to_val, test_loader, disc_loss_target, sharpness, warm_up_len,
                 epochs_to_save):
     writer = SummaryWriter(log_dir)
@@ -240,7 +243,7 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
     disc_batches = 0
     train_discriminator = False
     for epoch in range(start_epoch, num_epochs):
-        loss_disc, loss_gen, fake_img = train_step(device, epoch, generator, discriminator, dataloader, criterion, scaler, opt_disc, opt_gen, train_discriminator)
+        loss_disc, loss_gen, fake_img = train_step(device, epoch, generator, discriminator, train_loader, criterion, scaler, opt_disc, opt_gen, train_discriminator)
 
         # Termina de entrenar este epoch
         # Evalua si toca
@@ -290,14 +293,22 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
     mlflow.end_run()
     writer.close()
 
-def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channels, image_size, batch_size, num_epochs,
-          image_input_res, epochs_to_val, epochs_to_save, disc_loss_target, sharpness, run_name, checkpoint_dir, log_dir,
-          pct_start):
+def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_loss_target, sharpness, run_name,
+          checkpoint_dir, log_dir, real_img_path, fake_img_path, batch_size, test_split, image_size, image_channels):
 
+    dataset = PairedImageDataset(real_img_path, fake_img_path, image_size=image_size)
 
-    dataloader = DataLoader(DummyFaceDataset(), batch_size=16, shuffle=True)
-    generator = Generator().to(device)
-    discriminator = Discriminator().to(device)
+    test_size = int(len(dataset) * test_split)
+    train_size = len(dataset) - test_size
+
+    torch.manual_seed(1984)
+    train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
+
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
+    test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False)
+
+    generator = Generator(image_channels=image_channels, image_size=image_size).to(device)
+    discriminator = Discriminator(img_channels=image_channels).to(device)
 
     opt_gen = torch.optim.Adam(generator.parameters(), lr=2e-4, betas=(0.5, 0.999))
     opt_disc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.5, 0.999))
@@ -312,18 +323,12 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
         mlflow.log_params({
             "warm_up_len": warm_up_len,
             "batch_size": batch_size,
-            "image_loss_lambda": image_loss_lambda,
-            "freeze_disc_loss": freeze_disc_loss,
-            "image_channels": image_channels,
-            "image_size": image_size,
             "num_epochs": num_epochs,
-            "image_input_res": image_input_res,
             "EPOCHS_TO_VAL": epochs_to_val,
             "EPOCHS_TO_SAVE": epochs_to_save,
             "disc_loss_target": disc_loss_target,
             "sharpness": sharpness,
             "scheduler": "OneCycleLR",
-            "pct_start": pct_start,
             "anneal_strategy": "cos"
         },)
 
@@ -333,17 +338,23 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
             num_epochs=num_epochs,
             discriminator=discriminator,
             generator=generator,
-            dataloader=dataloader,
+            train_loader=train_loader,
             criterion=criterion,
             opt_disc=opt_disc,
             opt_gen=opt_gen,
             scaler=scaler,
             log_dir=log_dir,
-            checkpoint_dir=checkpoint_dir
+            checkpoint_dir=checkpoint_dir,
+            epochs_to_val=epochs_to_val,
+            test_loader=test_loader,
+            disc_loss_target=disc_loss_target,
+            sharpness= sharpness,
+            warm_up_len=warm_up_len,
+            epochs_to_save=epochs_to_save
         )
 
 if __name__ == "__main__":
-    load_dotenv()
+    load_dotenv("world/.env")
 
     # Cuda
     torch.set_float32_matmul_precision('high')
@@ -365,6 +376,9 @@ if __name__ == "__main__":
     SHARPNESS = float(os.getenv("sharpness"))
     PCT_START = float(os.getenv("pct_start"))
     IMAGE_INPUT_RES = int(os.getenv("IMAGE_INPUT_RES"))
+    FAKE_IMG_PATH = os.getenv("fake_img_path")
+    REAL_IMG_PATH = os.getenv("real_img_path")
+    TEST_SPLIT = float(os.getenv("TEST_SPLIT"))
 
     CHECKPOINT_DIR = os.path.join(os.getenv("checkpoint_dir"), RUN_NAME)
     LOG_DIR = os.path.join(os.getenv("log_dir"), RUN_NAME)
@@ -376,11 +390,6 @@ if __name__ == "__main__":
     start(
         device=DEVICE,
         warm_up_len=WARM_UP_LEN,
-        image_loss_lambda=IMAGE_LOSS_LAMBDA,
-        freeze_disc_loss=FREEZE_DISC_LOSS,
-        image_channels=IMAGE_CHANNELS,
-        image_size=IMAGE_SIZE,
-        image_input_res=IMAGE_INPUT_RES,
         batch_size=BATCH_SIZE,
         num_epochs=NUM_EPOCHS,
         epochs_to_val=EPOCHS_TO_VAL,
@@ -390,6 +399,10 @@ if __name__ == "__main__":
         run_name=RUN_NAME,
         checkpoint_dir=CHECKPOINT_DIR,
         log_dir=LOG_DIR,
-        pct_start=PCT_START
+        real_img_path=REAL_IMG_PATH,
+        fake_img_path=FAKE_IMG_PATH,
+        test_split=TEST_SPLIT,
+        image_size=IMAGE_SIZE,
+        image_channels=IMAGE_CHANNELS
     )
 
