@@ -1,13 +1,15 @@
+from datasets import load_dataset
+import random
 import torch
 from transformers import AutoTokenizer, AutoModel
 from transformer_decoder import TransformerDecoder
 import torch.nn.functional as F
 
 
-def decode_text(input_text: str, tokenizer, bert, decoder):
+def decode_text(input_text: str, tokenizer, bert, decoder, max_len, device):
     sos_token_id = TOKENIZER.cls_token_id
     pad_token_id = TOKENIZER.pad_token_id
-    input_ids = tokenizer.encode(input_text, truncation=True, padding="max_length", max_length=MAX_LEN, return_tensors="pt").to(DEVICE)
+    input_ids = tokenizer.encode(input_text, truncation=True, padding="max_length", max_length=max_len, return_tensors="pt").to(device)
     attention_mask = (input_ids != pad_token_id).long()
 
     with torch.no_grad():
@@ -18,10 +20,10 @@ def decode_text(input_text: str, tokenizer, bert, decoder):
 
     return decoded
 
-def bert_similarity(text1: str, text2: str, tokenizer, bert):
+def bert_similarity(text1: str, text2: str, tokenizer, bert, max_len, device):
     # Tokenización
-    ids1 = tokenizer(text1, return_tensors="pt", padding="max_length", truncation=True, max_length=MAX_LEN).to(DEVICE)
-    ids2 = tokenizer(text2, return_tensors="pt", padding="max_length", truncation=True, max_length=MAX_LEN).to(DEVICE)
+    ids1 = tokenizer(text1, return_tensors="pt", padding="max_length", truncation=True, max_length=max_len).to(device)
+    ids2 = tokenizer(text2, return_tensors="pt", padding="max_length", truncation=True, max_length=max_len).to(device)
 
     # Embeddings BERT
     with torch.no_grad():
@@ -34,9 +36,7 @@ def bert_similarity(text1: str, text2: str, tokenizer, bert):
 
     return cos_sim, l2_dist
 
-
-# --- Ejemplo de uso ---
-if __name__ == "__main__":
+def setup():
     # --- Configuración ---
     DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
     MAX_LEN = 60
@@ -55,13 +55,30 @@ if __name__ == "__main__":
     _decoder.eval()
     _bert.eval()
 
-    _input_text = "Machine learning models require a lot of data"
-    _output_text = decode_text(_input_text, TOKENIZER, _bert, _decoder)
+    return _bert, _decoder, TOKENIZER, MAX_LEN, DEVICE
 
-    print(f"📝 Input:  {_input_text}")
-    print(f"🔁 Output: {_output_text}")
+# --- Ejemplo de uso ---
+if __name__ == "__main__":
+    _bert, _decoder, TOKENIZER, MAX_LEN, DEVICE = setup()
 
-    cos, l2 = bert_similarity(_input_text, _output_text, TOKENIZER, _bert)
-    print(f"🔗 Cosine similarity: {cos:.4f}")
-    print(f"📏 L2 distance:      {l2:.4f}")
+    # Cargar test set
+    raw_dataset = load_dataset("wikitext", "wikitext-2-raw-v1")['train']
+    dataset = raw_dataset.train_test_split(test_size=0.1, seed=42)
+    val_dataset = dataset["test"]
 
+    # Filtrar frases útiles (las mismas condiciones que tu entrenamiento)
+    val_dataset = val_dataset.filter(lambda x: x["text"].strip() != "" and 10 < len(x["text"].split()) < 50)
+
+    # Seleccionar frases aleatorias (por ejemplo, 5)
+    sampled = val_dataset.select(random.sample(range(len(val_dataset)), 5))
+
+    for i, example in enumerate(sampled):
+        _input_text = example['text'].strip()
+        _output_text = decode_text(_input_text, TOKENIZER, _bert, _decoder, MAX_LEN, DEVICE)
+
+        print(f"📝 Input:  {_input_text}")
+        print(f"🔁 Output: {_output_text}")
+
+        cos, l2 = bert_similarity(_input_text, _output_text, TOKENIZER, _bert, MAX_LEN, DEVICE)
+        print(f"🔗 Cosine similarity: {cos:.4f}")
+        print(f"📏 L2 distance:      {l2:.4f}")
