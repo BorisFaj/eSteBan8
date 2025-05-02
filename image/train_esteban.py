@@ -12,7 +12,7 @@ import math
 from dotenv import load_dotenv
 import os
 from data_handler import DataHandler
-from start_experiment import start_mlflow, log_gpu_stats, log_model_histograms
+from mlflow_utils import start_mlflow, log_gpu_stats, log_model_histograms
 load_dotenv()
 
 # Cuda
@@ -166,7 +166,7 @@ def evaluate_step(encoder, decoder, discriminator, test_loader, writer, device, 
         mlflow.log_metric("Test/Loss/Message", avg_message_loss, step=epoch)
         mlflow.log_metric("Test/Loss/Discriminator", avg_disc_loss, step=epoch)
         mlflow.log_metric("Test/Accuracy/Bit", avg_bit_accuracy, step=epoch)
-        mlflow.log_metric("Test/Accuracy/Adversarial", avg_adv_loss, step=epoch)
+        mlflow.log_metric("Test/Loss/Adversarial", avg_adv_loss, step=epoch)
 
         # TensorBoard logging por epoch
         writer.add_scalar("Test/Loss/Message", avg_message_loss, epoch)
@@ -213,6 +213,7 @@ def get_noisy(image):
         return image
 
 def train_step(train_discriminator, total_disc_loss, disc_batches):
+    bce = nn.BCEWithLogitsLoss()
     adv_loss = F.mse_loss(torch.ones_like(torch.tensor([0.])), torch.ones_like(torch.tensor([0.])))  # 0
 
     # Forward
@@ -234,8 +235,11 @@ def train_step(train_discriminator, total_disc_loss, disc_batches):
             disc_opt.zero_grad()
             scaler.scale(disc_loss).backward()
             scaler.step(disc_opt)
-            scheduler_disc.step()
             scaler.update()
+
+            # Solo avanzar el scheduler si hubo grads válidos
+            if any(p.grad is not None for p in discriminator.parameters()):
+                scheduler_disc.step()
 
             total_disc_loss += disc_loss.item()
             disc_batches += 1
@@ -274,6 +278,21 @@ def train_step(train_discriminator, total_disc_loss, disc_batches):
         scaler.update()
         log_gpu_stats(mlflow=mlflow, epoch=epoch)
 
+        if torch.isnan(message_loss) or torch.isinf(message_loss):
+            print("🛑 NaN o inf en message_loss")
+            print("Recovered messages stats:", recovered_messages.min().item(), recovered_messages.max().item())
+            raise ValueError("Message loss es NaN o inf")
+
+
+        if message_loss < 0.0:
+            raise Exception(f"WTF Loss negativo en el mensaje!!\n."
+                            f"message_loss = _message_loss + message_alpha * l2_penalty\n"
+                            f"message_loss: {message_loss}\n"
+                            f"_message_loss: {_message_loss}\n"
+                            f"message_alpha: {message_alpha}\n"
+                            f"l2_penalty: {l2_penalty}\n"
+                            )
+
 
     return train_discriminator, adv_loss, message_loss, recovered_messages, stego_images
 
@@ -283,7 +302,7 @@ def log_epoch(mlflow, writer, epoch, avg_message_loss, avg_disc_loss, avg_bit_ac
     mlflow.log_metric("Loss/Message", avg_message_loss, step=epoch)
     mlflow.log_metric("Loss/Discriminator", avg_disc_loss, step=epoch)
     mlflow.log_metric("Accuracy/Bit", avg_bit_accuracy, step=epoch)
-    mlflow.log_metric("Accuracy/Adversarial", avg_adv_loss, step=epoch)
+    mlflow.log_metric("Loss/Adversarial", avg_adv_loss, step=epoch)
 
     # TensorBoard logging por epoch
     writer.add_scalar("Loss/Message", avg_message_loss, epoch)
@@ -344,8 +363,6 @@ steps_per_epoch = len(train_loader)
 scheduler_enc_dec = OneCycleLR(enc_dec_opt, max_lr=1e-4, steps_per_epoch=steps_per_epoch, epochs=num_epochs, pct_start=0.1, anneal_strategy='cos')
 scheduler_disc = OneCycleLR(disc_opt, max_lr=1e-4, steps_per_epoch=steps_per_epoch, epochs=num_epochs, pct_start=0.1, anneal_strategy='cos')
 
-bce = nn.BCEWithLogitsLoss()
-
 global_step = 0
 start_epoch = 0
 
@@ -358,6 +375,7 @@ for epoch in range(start_epoch, num_epochs):
     num_batches = 0
     disc_batches = 0
     total_bit_accuracy = 0
+    total_recovered_messages = 0
     train_discriminator = False
 
     for i, (images, messages) in enumerate(train_loader):
@@ -370,6 +388,9 @@ for epoch in range(start_epoch, num_epochs):
             total_disc_loss=total_disc_loss
         )
 
+        if message_loss < 0.0:
+            raise Exception(f"WTF. message_loss: {message_loss}")
+
         with torch.no_grad():
             # Bit Accuracy
             pred_bits = (torch.sigmoid(recovered_messages) > 0.5).int()
@@ -379,11 +400,12 @@ for epoch in range(start_epoch, num_epochs):
         total_message_loss += message_loss.item()
         total_adv_loss += adv_loss.item()
         total_bit_accuracy += bit_accuracy.item()
+        total_recovered_messages += recovered_messages
         num_batches += 1
         global_step += 1
 
-        if epoch % 100 == 0 and i == 0:
-            writer.add_histogram('RecoveredMessages/Values', recovered_messages, global_step)
+        if total_message_loss < 0.0:
+            raise Exception(f"WTF. total_message_loss: {total_message_loss}")
 
     # Promedio por epoch
     if disc_batches > 0:
@@ -393,6 +415,10 @@ for epoch in range(start_epoch, num_epochs):
     avg_message_loss = total_message_loss / num_batches
     avg_adv_loss = total_adv_loss / num_batches
     avg_bit_accuracy = total_bit_accuracy / num_batches
+    avg_recovered_messages = total_recovered_messages / num_batches
+
+    if avg_message_loss < 0.0:
+        raise Exception(f"WTF. avg_message_loss: {avg_message_loss}")
 
 
     if (epoch + 1) % EPOCHS_TO_VAL == 0:
