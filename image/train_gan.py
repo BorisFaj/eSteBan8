@@ -205,7 +205,7 @@ def train_step(epoch, images, messages, encoder, discriminator, train_discrimina
         image_loss = F.mse_loss(stego_images, images)
         edge_loss = sobel_loss(stego_images, images)
 
-        total_loss = (adv_weight * adv_loss + img_weight * image_loss + edge_weight * edge_loss) + (disc_loss * disc_weight)
+        total_loss = adv_weight * adv_loss + img_weight * image_loss + edge_weight * edge_loss
 
         enc_dec_opt.zero_grad()
         scaler.scale(total_loss).backward()
