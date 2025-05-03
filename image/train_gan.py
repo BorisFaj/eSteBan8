@@ -184,14 +184,14 @@ def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, 
 
         scaler.update()
 
-    return disc_loss, pred_fake
+    return disc_loss, pred_fake, scaler, scheduler_disc, disc_opt
 
 def train_step(epoch, images, messages, encoder, discriminator, train_discriminator, disc_opt, scheduler_disc, enc_dec_opt,
                scheduler_enc_dec, scaler, adv_weight, img_weight, edge_weight, disc_weight):
     with amp.autocast("cuda"):
         stego_images = encoder(images, messages)
 
-        disc_loss, disc_pred = discriminator_step(
+        disc_loss, disc_pred, scaler, scheduler_disc, disc_opt = discriminator_step(
             discriminator=discriminator,
             disc_opt=disc_opt,
             scaler=scaler,
@@ -214,7 +214,7 @@ def train_step(epoch, images, messages, encoder, discriminator, train_discrimina
         scaler.update()
         log_gpu_stats(mlflow=mlflow, epoch=epoch)
 
-    return adv_loss, disc_loss, stego_images
+    return adv_loss, disc_loss, stego_images, scaler, scheduler_disc, scheduler_enc_dec, disc_opt, enc_dec_opt
 
 def log_epoch(writer, epoch, avg_disc_loss, avg_adv_loss, images, stego_images, global_step,
               current_lr_enc_dec, current_lr_disc):
@@ -363,7 +363,8 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
         for i, (images, messages) in enumerate(train_loader):
             images = images.to(device)
 
-            adv_loss, disc_loss, stego_images = train_step(
+            (adv_loss, disc_loss, stego_images, scaler, scheduler_disc,
+             scheduler_enc_dec, disc_opt, enc_dec_opt) = train_step(
                 epoch=epoch,
                 images=images,
                 messages=messages,
@@ -434,8 +435,8 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             current_lr_disc=current_lr_disc
         )
 
-        log_model_histograms(writer, getattr(encoder, "_orig_mod", encoder), "Encoder", epoch)
-        log_model_histograms(writer, getattr(discriminator, "_orig_mod", discriminator), "Discriminator", epoch)
+        log_model_histograms(writer, encoder, "Encoder", epoch)
+        log_model_histograms(writer, discriminator, "Discriminator", epoch)
 
         if (epoch + 1) % epochs_to_save == 0:
             save_models(epoch, encoder, discriminator, scaler, checkpoint_dir)
