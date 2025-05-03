@@ -42,7 +42,7 @@ def train_step(batch, bert, decoder, criterion, optimizer, pad_token_id, sos_tok
 
     attention_mask = (input_ids != pad_token_id).long()
 
-    with torch.no_grad():
+    with torch.no_grad(), torch.cuda.amp.autocast("cuda"):
         z = bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state  # shape: (batch_size, seq_len, hidden_dim)
 
     outputs = decoder(z, sos_token_id=sos_token_id, targets=targets, generate=False, teacher_forcing_ratio=0.7)
@@ -53,7 +53,7 @@ def train_step(batch, bert, decoder, criterion, optimizer, pad_token_id, sos_tok
     optimizer.zero_grad()
     loss.backward()
 
-    if epoch % 10 == 0:
+    if (epoch + 1) % 10 == 0:
         for name, param in decoder.named_parameters():
             if param.requires_grad and param.grad is not None:
                 writer.add_histogram(f"Decoder/Weights/{name}", param.data, epoch)
@@ -253,6 +253,8 @@ def start(device, batch_size, run_name, checkpoint_dir, log_dir, embed_dim, epoc
     decoder = TransformerDecoder(embedding_dim=embed_dim, vocab_size=vocab_size, max_len=max_token_len).to(
         device)
 
+    decoder = torch.compile(decoder)
+
     optimizer = torch.optim.Adam(decoder.parameters(), lr=1e-4)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=30, gamma=0.9)
 
@@ -273,7 +275,13 @@ def start(device, batch_size, run_name, checkpoint_dir, log_dir, embed_dim, epoc
     train_dataset.set_format(type="torch", columns=["input_ids"])
     val_dataset.set_format(type="torch", columns=["input_ids"])
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=2, pin_memory=True)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        shuffle=True,
+        num_workers=16,
+        pin_memory=True
+    )
 
     _ = start_mlflow()
 
