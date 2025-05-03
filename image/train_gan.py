@@ -157,8 +157,8 @@ def sobel_loss(stego, original):
     return F.l1_loss(grad_stego, grad_orig)
 
 def calc_disc_loss(discriminator, images, stego_images, disc_rampup_factor):
-    disc_real = discriminator(images).clamp(-10, 10)
-    disc_fake = discriminator(stego_images.detach()).clamp(-10, 10)
+    disc_real = discriminator(images)
+    disc_fake = discriminator(stego_images.detach())
 
     real_labels = torch.full_like(disc_real, 0.9)
     fake_labels = torch.full_like(disc_fake, 0.1)
