@@ -77,21 +77,22 @@ def sobel_loss(fake, original):
     grad_orig = gradient_magnitude(original)
     return F.l1_loss(grad_fake, grad_orig)
 
-def calc_disc_loss(device, generator, discriminator, real_img, fake_img, criterion):
-    valid = torch.ones((fake_img.size(0), 1), device=device)
-    fake = torch.zeros((fake_img.size(0), 1), device=device)
+def calc_disc_loss(device, discriminator, real_image, fake_image, criterion):
+
+    fake = torch.zeros((fake_image.size(0), 1), device=device)
 
     with torch.amp.autocast(device_type="cuda"):
-        fake_img = generator(fake_img)
-        real_pred = discriminator(real_img)
-        fake_pred = discriminator(fake_img.detach())
+        real_pred = discriminator(real_image)
+        fake_pred = discriminator(fake_image)
+        valid = torch.ones_like(fake_pred)
         loss_disc = criterion(real_pred, valid) + criterion(fake_pred, fake)
 
-    return loss_disc, fake_img, valid
+    return loss_disc, valid
 
-def discriminator_step(device, generator, criterion, discriminator, disc_opt, scaler, images, fake_images, train):
+def discriminator_step(device, criterion, discriminator, disc_opt, scaler, real_image, fake_image, train):
 
-    disc_loss, fake_img, valid = calc_disc_loss(device, generator, discriminator, images, fake_images, criterion)
+    disc_loss, valid = calc_disc_loss(device=device, discriminator=discriminator, real_image=real_image,
+                                      fake_image=fake_image, criterion=criterion)
 
     if train:
         disc_opt.zero_grad()
@@ -101,7 +102,7 @@ def discriminator_step(device, generator, criterion, discriminator, disc_opt, sc
         scaler.step(disc_opt)
         scaler.update()
 
-    return disc_loss, fake_img, valid
+    return disc_loss, valid
 
 def log_epoch(writer, epoch, loss_disc, loss_gen):
     writer.add_scalar("Loss/Discriminator", loss_disc.item(), epoch)
@@ -133,20 +134,28 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
 
     total_gen_loss = 0
     total_disc_loss = 0
+
     with torch.no_grad():
         for step_n, (x, real_img) in enumerate(test_loader):
             x, real_img = x.to(device), real_img.to(device)
-            valid = torch.ones((x.size(0), 1), device=device)
             fake = torch.zeros((x.size(0), 1), device=device)
 
             with torch.amp.autocast(device_type="cuda"):
                 fake_img = generator(x)
                 real_pred = discriminator(real_img)
                 fake_pred = discriminator(fake_img.detach())
+                valid = torch.ones_like(fake_pred)
                 loss_disc = criterion(real_pred, valid) + criterion(fake_pred, fake)
 
             with torch.amp.autocast(device_type="cuda"):
                 fake_pred = discriminator(fake_img)
+                if torch.isnan(fake_pred).any() or torch.isinf(fake_pred).any():
+                    print("🛑 fake_pred contiene NaN o Inf")
+                    print("fake_pred:", fake_pred)
+                    print("valid:", valid)
+                    continue  # o return para salir de la iteración
+
+                fake_pred = torch.clamp(fake_pred, min=-10, max=10)
                 loss_gen = criterion(fake_pred, valid)
 
             total_gen_loss += loss_gen
@@ -194,11 +203,38 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
     total_loss_gen = 0
     for step_n, (x, real_img) in enumerate(pbar):
         x, real_img = x.to(device), real_img.to(device)
-        loss_disc, fake_img, valid = discriminator_step(device, generator, criterion, discriminator, opt_disc, scaler, real_img, x, train_discriminator)
+
+        with torch.no_grad():
+            fake_img_disc = generator(x)
+
+        loss_disc, valid = discriminator_step(
+            device=device,
+            criterion=criterion,
+            discriminator=discriminator,
+            disc_opt=opt_disc,
+            scaler=scaler,
+            real_image=real_img,
+            fake_image=fake_img_disc,
+            train=train_discriminator)
 
         with torch.amp.autocast(device_type="cuda"):
+            fake_img = generator(x)
             fake_pred = discriminator(fake_img)
+
+            # Check for NaNs or Infs **before** clamp and loss
+            if torch.isnan(fake_pred).any() or torch.isinf(fake_pred).any():
+                print("🛑 fake_pred contiene NaN o Inf antes del clamp")
+                print("fake_pred stats:", fake_pred.min().item(), fake_pred.max().item(), fake_pred.mean().item())
+                raise Exception("wtf")
+
+            fake_pred = torch.clamp(fake_pred, min=-10, max=10)
             loss_gen = criterion(fake_pred, valid)
+
+            if torch.isnan(loss_gen).any():
+                print("🛑 loss_gen contiene NaN")
+                print("fake_pred:", fake_pred)
+                print("valid:", valid)
+                raise Exception("wtf")
 
         print("Loss gen:", loss_gen.item())  # Puede lanzar error si ya es NaN
         print("Fake pred min/max/mean:", fake_pred.min().item(), fake_pred.max().item(), fake_pred.mean().item())
@@ -310,8 +346,8 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
     generator = Generator(image_channels=image_channels, image_size=image_size).to(device)
     discriminator = Discriminator(image_channels=image_channels).to(device)
 
-    generator = torch.compile(generator)
-    discriminator = torch.compile(discriminator)
+    # generator = torch.compile(generator)
+    # discriminator = torch.compile(discriminator)
 
     opt_gen = torch.optim.Adam(generator.parameters(), lr=2e-4, betas=(0.5, 0.999))
     opt_disc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.5, 0.999))
