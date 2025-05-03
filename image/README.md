@@ -2,7 +2,7 @@
 
 Sistema de esteganografía basado en GANs donde un mensaje binario es ocultado dentro de una imagen y luego recuperado, manteniendo alta calidad visual.
 
-## 🛡️ Arquitectura general
+## 🛠️ Arquitectura general
 
 * **Encoder**:
 
@@ -22,13 +22,12 @@ Sistema de esteganografía basado en GANs donde un mensaje binario es ocultado d
 
 ## 📦 Dataset
 
-* Dataset personalizado (`data_handler.py`).
+* Dataset: **OpenImages V6**.
 * Imágenes reescaladas a `128x128` (`IMAGE_INPUT_RES=128`).
 * Normalización en rango `[-1, 1]`.
-* **Embeddings de mensaje** generados dinámicamente:
+* **Mensajes** generados a partir del dataset **PAWS** (Paraphrase Adversaries from Word Scrambling).
 
-  * Se utiliza un modelo de texto **GPT-2 Emotion** (`heegyu/gpt2-emotion`) para generar frases aleatorias asociadas a emociones.
-  * Las frases generadas se **tokenizan** y **se embeben** usando **BERT** (`bert-base-uncased`).
+  * Las frases se **tokenizan** y se **embeben** usando **BERT** (`bert-base-uncased`).
   * Los vectores resultantes (`message_size=768`) son usados como el mensaje binario a ocultar en las imágenes.
 * El input completo para el Encoder es: `(imagen real, embedding textual)`.
 
@@ -102,7 +101,7 @@ Sistema de esteganografía basado en GANs donde un mensaje binario es ocultado d
 
   * Script para cargar un modelo entrenado, ocultar mensajes y recuperarlos en imágenes nuevas.
 
-## 🔹 Entrenamiento parcial (Encoder + Discriminador)
+## 🔹 Nuevo: Entrenamiento parcial (Encoder + Discriminador)
 
 Se ha separado el entrenamiento del sistema completo en dos fases para facilitar la estabilidad y el control:
 
