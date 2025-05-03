@@ -36,7 +36,7 @@ def start_mlflow():
 
     return mlflow
 
-def train_step(batch, bert, decoder, criterion, optimizer, pad_token_id, sos_token_id, vocab_size):
+def train_step(batch, bert, decoder, criterion, optimizer, pad_token_id, sos_token_id, vocab_size, epoch, writer):
     input_ids = batch["input_ids"].to(DEVICE)
     targets = input_ids[:, 1:]
 
@@ -52,6 +52,13 @@ def train_step(batch, bert, decoder, criterion, optimizer, pad_token_id, sos_tok
 
     optimizer.zero_grad()
     loss.backward()
+
+    if epoch % 10 == 0:
+        for name, param in decoder.named_parameters():
+            if param.requires_grad and param.grad is not None:
+                writer.add_histogram(f"Decoder/Weights/{name}", param.data, epoch)
+                writer.add_histogram(f"Decoder/Grads/{name}", param.grad, epoch)
+
     torch.nn.utils.clip_grad_norm_(decoder.parameters(), max_norm=1.0)
     optimizer.step()
 
@@ -89,6 +96,20 @@ def validate_step(writer, epoch, bert, decoder, tokenizer, pad_token_id, sos_tok
         hyps.append(decoded_text)
         bleus.append(bleu)
         rouges.append(rouge_score)
+
+    # Evaluación fija con frase conocida
+    fixed_sentence = "the quick brown fox jumps over the lazy dog"
+    fixed_ids = tokenizer.encode(fixed_sentence, truncation=True, max_length=tokenizer.model_max_length, padding="max_length")
+    fixed_tensor = torch.tensor(fixed_ids).unsqueeze(0).to(DEVICE)
+    fixed_mask = (fixed_tensor != pad_token_id).long()
+
+    with torch.no_grad():
+        z_fixed = bert(input_ids=fixed_tensor, attention_mask=fixed_mask).last_hidden_state
+        output_ids = decoder(z_fixed, generate=True, sos_token_id=sos_token_id, eos_token_id=tokenizer.eos_token_id)
+        decoded_fixed = tokenizer.batch_decode(output_ids, skip_special_tokens=True)[0]
+
+    writer.add_text("Fixed/Reference", fixed_sentence, epoch)
+    writer.add_text("Fixed/Hypothesis", decoded_fixed, epoch)
 
     avg_bleu = sum(bleus) / sample_size
     avg_rouge1 = sum(r["rouge1"] for r in rouges) / sample_size
@@ -169,7 +190,9 @@ def train_model(device, tokenizer, train_loader, val_dataset, decoder, optimizer
                 optimizer=optimizer,
                 pad_token_id=pad_token_id,
                 sos_token_id=sos_token_id,
-                vocab_size=vocab_size
+                vocab_size=vocab_size,
+                epoch=epoch,
+                writer=writer
             )
             total_loss += loss
 
