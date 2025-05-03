@@ -430,8 +430,8 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             current_lr_disc=current_lr_disc
         )
 
-        log_model_histograms(writer, encoder, "Encoder", epoch)
-        log_model_histograms(writer, discriminator, "Discriminator", epoch)
+        log_model_histograms(writer, getattr(encoder, "_orig_mod", encoder), "Encoder", epoch)
+        log_model_histograms(writer, getattr(discriminator, "_orig_mod", discriminator), "Discriminator", epoch)
 
         if (epoch + 1) % epochs_to_save == 0:
             save_models(epoch, encoder, discriminator, scaler, checkpoint_dir)
