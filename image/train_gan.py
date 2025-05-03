@@ -168,11 +168,11 @@ def calc_disc_loss(discriminator, images, stego_images):
     print(f"[Disc Real] mean={pred_real.mean().item():.2f} std={pred_real.std().item():.2f}")
     print(f"[Disc Fake] mean={pred_fake.mean().item():.2f} std={pred_fake.std().item():.2f}")
 
-    return disc_loss, pred_fake
+    return disc_loss
 
 def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images, train):
 
-    disc_loss, pred_fake = calc_disc_loss(discriminator=discriminator, images=images, stego_images=stego_images)
+    disc_loss = calc_disc_loss(discriminator=discriminator, images=images, stego_images=stego_images)
 
     if train:
         disc_opt.zero_grad()
@@ -184,14 +184,14 @@ def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, 
 
         scaler.update()
 
-    return disc_loss, pred_fake, scaler, scheduler_disc, disc_opt
+    return disc_loss, scaler, scheduler_disc, disc_opt
 
 def train_step(epoch, images, messages, encoder, discriminator, train_discriminator, disc_opt, scheduler_disc, enc_dec_opt,
                scheduler_enc_dec, scaler, adv_weight, img_weight, edge_weight, disc_weight):
     with amp.autocast("cuda"):
         stego_images = encoder(images, messages)
 
-        disc_loss, disc_pred, scaler, scheduler_disc, disc_opt = discriminator_step(
+        disc_loss, scaler, scheduler_disc, disc_opt = discriminator_step(
             discriminator=discriminator,
             disc_opt=disc_opt,
             scaler=scaler,
@@ -201,6 +201,7 @@ def train_step(epoch, images, messages, encoder, discriminator, train_discrimina
             train=train_discriminator
         )
 
+        disc_pred = discriminator(stego_images)
         adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
         image_loss = F.mse_loss(stego_images, images)
         edge_loss = sobel_loss(stego_images, images)
