@@ -1,16 +1,15 @@
 import torch
 from torch import nn
 from world.data_handler import PairedImageDataset
-from torchvision import transforms
 from torchvision.utils import make_grid
 from torch.utils.tensorboard import SummaryWriter
 import mlflow
 import os
 from tqdm import tqdm
-from world.discriminator import Discriminator
+from image.discriminator import Discriminator
 from world.generator import Generator
 from image.mlflow_utils import log_gpu_stats, log_model_histograms, start_mlflow
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import DataLoader, random_split
 from dotenv import load_dotenv
 import math
 import torch.nn.functional as F
@@ -292,7 +291,7 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
 
     generator = Generator(image_channels=image_channels, image_size=image_size).to(device)
-    discriminator = Discriminator(img_channels=image_channels).to(device)
+    discriminator = Discriminator(image_channels=image_channels).to(device)
 
     generator = torch.compile(generator)
     discriminator = torch.compile(discriminator)
