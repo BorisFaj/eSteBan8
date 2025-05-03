@@ -304,7 +304,11 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
             "message_size": message_size,
             "scheduler": "OneCycleLR",
             "pct_start": pct_start,
-            "anneal_strategy": "cos"
+            "anneal_strategy": "cos",
+            "adv_weight": adv_weight,
+            "img_weight": img_weight,
+            "edge_weight": edge_weight,
+            "disc_weight": disc_weight
         },)
 
         train_model(
