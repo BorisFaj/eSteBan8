@@ -156,9 +156,9 @@ def sobel_loss(stego, original):
     grad_orig = gradient_magnitude(original)
     return F.l1_loss(grad_stego, grad_orig)
 
-def calc_disc_loss(discriminator, images, stego_images):
-    disc_real = discriminator(images)
-    disc_fake = discriminator(stego_images.detach())
+def calc_disc_loss(discriminator, images, stego_images, disc_rampup_factor):
+    disc_real = discriminator(images).clamp(-10, 10)
+    disc_fake = discriminator(stego_images.detach()).clamp(-10, 10)
 
     real_labels = torch.full_like(disc_real, 0.9)
     fake_labels = torch.full_like(disc_fake, 0.1)
@@ -166,14 +166,14 @@ def calc_disc_loss(discriminator, images, stego_images):
     loss_real = F.binary_cross_entropy_with_logits(disc_real, real_labels)
     loss_fake = F.binary_cross_entropy_with_logits(disc_fake, fake_labels)
 
-    print(f"[Disc Real] mean={disc_real.mean().item():.2f} std={disc_real.std().item():.2f}")
-    print(f"[Disc Fake] mean={disc_fake.mean().item():.2f} std={disc_fake.std().item():.2f}")
+    return (loss_real + loss_fake) * disc_rampup_factor
 
-    return loss_real + loss_fake
+def get_disc_rampup_factor(epoch, rampup_epochs=50):
+    return min(1.0, 0.1 + 0.9 * (epoch / rampup_epochs))
 
-def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images, train):
+def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images, train, rampup_factor):
 
-    disc_loss = calc_disc_loss(discriminator=discriminator, images=images, stego_images=stego_images)
+    disc_loss = calc_disc_loss(discriminator=discriminator, images=images, stego_images=stego_images, disc_rampup_factor=rampup_factor)
 
     if train:
         disc_opt.zero_grad()
@@ -187,21 +187,22 @@ def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, 
 
         scaler.update()
 
-    return disc_loss
+    return discriminator, scaler, disc_opt, disc_loss
 
 def train_step(epoch, images, messages, encoder, discriminator, train_discriminator, disc_opt, scheduler_disc, enc_dec_opt,
                scheduler_enc_dec, scaler):
     with amp.autocast("cuda"):
         stego_images = encoder(images, messages)
 
-        disc_loss = discriminator_step(
+        discriminator, scaler, disc_opt, disc_loss = discriminator_step(
             discriminator=discriminator,
             disc_opt=disc_opt,
             scaler=scaler,
             scheduler_disc=scheduler_disc,
             images=images,
             stego_images=stego_images,
-            train=train_discriminator
+            train=train_discriminator,
+            rampup_factor=get_disc_rampup_factor(epoch, rampup_epochs=5)
         )
 
         k_adv = 1.0
