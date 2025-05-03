@@ -4,6 +4,7 @@ import random
 import torch
 import torch.nn as nn
 import evaluate
+from torch import amp
 from torch.utils.data import DataLoader
 from transformers import AutoTokenizer, AutoModel
 from datasets import load_dataset
@@ -42,7 +43,7 @@ def train_step(batch, bert, decoder, criterion, optimizer, pad_token_id, sos_tok
 
     attention_mask = (input_ids != pad_token_id).long()
 
-    with torch.no_grad(), torch.cuda.amp.autocast("cuda"):
+    with torch.no_grad(), amp.autocast("cuda"):
         z = bert(input_ids=input_ids, attention_mask=attention_mask).last_hidden_state  # shape: (batch_size, seq_len, hidden_dim)
 
     outputs = decoder(z, sos_token_id=sos_token_id, targets=targets, generate=False, teacher_forcing_ratio=0.7)
