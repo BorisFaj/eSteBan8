@@ -15,24 +15,6 @@ from dotenv import load_dotenv
 import math
 import torch.nn.functional as F
 
-class DummyFaceDataset(torch.utils.data.Dataset):
-    def __init__(self, size=1000, image_size=224):
-        self.size = size
-        self.image_size = image_size
-        self.transform = transforms.Compose([
-            transforms.Resize((image_size, image_size)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5]*3, [0.5]*3)
-        ])
-
-    def __len__(self):
-        return self.size
-
-    def __getitem__(self, idx):
-        x = torch.randn(3, self.image_size, self.image_size)  # Imagen OpenImages
-        y = torch.randn(3, self.image_size, self.image_size)  # Imagen de cara
-        return x, y
-
 def should_train_discriminator(
         disc_loss: float,
         gen_loss: float,
@@ -239,6 +221,8 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
     writer = SummaryWriter(log_dir)
     writer.add_text("Entrenamiento", "Iniciado correctamente", 0)
     writer.flush()
+
+    torch.autograd.set_detect_anomaly(True)
 
     disc_batches = 0
     train_discriminator = False
