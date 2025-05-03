@@ -156,30 +156,27 @@ def sobel_loss(stego, original):
     grad_orig = gradient_magnitude(original)
     return F.l1_loss(grad_stego, grad_orig)
 
-def calc_disc_loss(discriminator, images, stego_images, disc_rampup_factor):
-    disc_real = discriminator(images)
-    disc_fake = discriminator(stego_images.detach())
+def calc_disc_loss(discriminator, images, stego_images):
+    pred_real = discriminator(images)
+    pred_fake = discriminator(stego_images.detach())
 
-    real_labels = torch.full_like(disc_real, 0.9)
-    fake_labels = torch.full_like(disc_fake, 0.1)
+    loss_real = F.mse_loss(pred_real, torch.ones_like(pred_real))
+    loss_fake = F.mse_loss(pred_fake, torch.zeros_like(pred_fake))
 
-    loss_real = F.binary_cross_entropy_with_logits(disc_real, real_labels)
-    loss_fake = F.binary_cross_entropy_with_logits(disc_fake, fake_labels)
+    disc_loss = loss_real / loss_fake
 
-    return (loss_real + loss_fake) * disc_rampup_factor
+    print(f"[Disc Real] mean={pred_real.mean().item():.2f} std={pred_real.std().item():.2f}")
+    print(f"[Disc Fake] mean={pred_fake.mean().item():.2f} std={pred_fake.std().item():.2f}")
 
-def get_disc_rampup_factor(epoch, rampup_epochs=50):
-    return min(1.0, 0.1 + 0.9 * (epoch / rampup_epochs))
+    return disc_loss, pred_fake
 
-def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images, train, rampup_factor):
+def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, stego_images, train):
 
-    disc_loss = calc_disc_loss(discriminator=discriminator, images=images, stego_images=stego_images, disc_rampup_factor=rampup_factor)
+    disc_loss, pred_fake = calc_disc_loss(discriminator=discriminator, images=images, stego_images=stego_images)
 
     if train:
         disc_opt.zero_grad()
         scaler.scale(disc_loss).backward()
-        scaler.unscale_(disc_opt)
-        torch.nn.utils.clip_grad_norm_(discriminator.parameters(), max_norm=1.0)
         scaler.step(disc_opt)
 
         if any(p.grad is not None for p in discriminator.parameters()):
@@ -187,39 +184,31 @@ def discriminator_step(discriminator, disc_opt, scaler, scheduler_disc, images, 
 
         scaler.update()
 
-    return discriminator, scaler, disc_opt, disc_loss
+    return disc_loss, pred_fake
 
 def train_step(epoch, images, messages, encoder, discriminator, train_discriminator, disc_opt, scheduler_disc, enc_dec_opt,
-               scheduler_enc_dec, scaler):
+               scheduler_enc_dec, scaler, adv_weight, img_weight, edge_weight, disc_weight):
     with amp.autocast("cuda"):
         stego_images = encoder(images, messages)
 
-        discriminator, scaler, disc_opt, disc_loss = discriminator_step(
+        disc_loss, disc_pred = discriminator_step(
             discriminator=discriminator,
             disc_opt=disc_opt,
             scaler=scaler,
             scheduler_disc=scheduler_disc,
             images=images,
             stego_images=stego_images,
-            train=train_discriminator,
-            rampup_factor=get_disc_rampup_factor(epoch, rampup_epochs=5)
+            train=train_discriminator
         )
 
-        k_adv = 1.0
-        k_img = 1.0
-        k_edge = 0.2
-
-        disc_pred = discriminator(stego_images)
         adv_loss = F.mse_loss(disc_pred, torch.ones_like(disc_pred))
         image_loss = F.mse_loss(stego_images, images)
         edge_loss = sobel_loss(stego_images, images)
 
-        total_loss = k_adv * adv_loss + k_img * image_loss + k_edge * edge_loss
+        total_loss = (adv_weight * adv_loss + img_weight * image_loss + edge_weight * edge_loss) + (disc_loss * disc_weight)
 
         enc_dec_opt.zero_grad()
         scaler.scale(total_loss).backward()
-        scaler.unscale_(enc_dec_opt)
-        torch.nn.utils.clip_grad_norm_(encoder.parameters(), max_norm=1.0)
         scaler.step(enc_dec_opt)
         scheduler_enc_dec.step()
         scaler.update()
@@ -270,7 +259,7 @@ def save_models(epoch, encoder, discriminator, scaler, checkpoint_dir):
 
 def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channels, image_size, batch_size, num_epochs,
           image_input_res, epochs_to_val, epochs_to_save, noise_std, style_loss_weight, disc_loss_target, sharpness,
-          run_name, checkpoint_dir, log_dir, message_size, pct_start):
+          run_name, checkpoint_dir, log_dir, message_size, pct_start, adv_weight, img_weight, edge_weight, disc_weight):
 
     train_dataset, train_loader, test_dataset, test_loader = DataHandler(batch_size=batch_size).get()
 
@@ -337,7 +326,11 @@ def start(device, warm_up_len, image_loss_lambda, freeze_disc_loss, image_channe
             sharpness=sharpness,
             enc_dec_opt=enc_dec_opt,
             checkpoint_dir=checkpoint_dir,
-            log_dir=log_dir
+            log_dir=log_dir,
+            adv_weight=adv_weight,
+            img_weight=img_weight,
+            edge_weight=edge_weight,
+            disc_weight=disc_weight
         )
 
 def to_float(val, default=0.0) -> float:
@@ -349,7 +342,7 @@ def to_float(val, default=0.0) -> float:
 
 def train_model(device, start_epoch, num_epochs, train_loader, test_loader, encoder, discriminator, scaler, scheduler_enc_dec,
                 scheduler_disc, disc_opt, enc_dec_opt, checkpoint_dir, log_dir, disc_loss_target, sharpness,
-                warm_up_len, epochs_to_save, epochs_to_val):
+                warm_up_len, epochs_to_save, epochs_to_val, adv_weight, img_weight, edge_weight, disc_weight):
     writer = SummaryWriter(log_dir)
     writer.add_text("Entrenamiento", "Iniciado correctamente", 0)
     writer.flush()
@@ -377,7 +370,11 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
                 scheduler_disc=scheduler_disc,
                 enc_dec_opt=enc_dec_opt,
                 scheduler_enc_dec=scheduler_enc_dec,
-                scaler=scaler
+                scaler=scaler,
+                adv_weight=adv_weight,
+                img_weight=img_weight,
+                edge_weight=edge_weight,
+                disc_weight=disc_weight
             )
 
             total_adv_loss += to_float(adv_loss)
@@ -390,9 +387,6 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
         if (epoch + 1) % epochs_to_val == 0:
             evaluate_step(encoder, discriminator, test_loader, writer, device, epoch)
             print("Evaluando sobre el test wey")
-
-        if train_discriminator:
-            disc_batches += 1
 
         avg_disc_loss = total_disc_loss / max(1, disc_batches)
         avg_adv_loss = total_adv_loss / num_batches
@@ -413,6 +407,7 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             if epoch > warm_up_len and disc_train_next:
                 print("🧠 [Discriminador]: empiezo a entrenar")
                 train_discriminator = True
+                disc_batches += 1
 
         # Log y save
         current_lr_enc_dec = scheduler_enc_dec.get_last_lr()[0]
@@ -430,8 +425,8 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             current_lr_disc=current_lr_disc
         )
 
-        log_model_histograms(writer, getattr(encoder, "_orig_mod", encoder), "Encoder", epoch)
-        log_model_histograms(writer, getattr(discriminator, "_orig_mod", discriminator), "Discriminator", epoch)
+        log_model_histograms(writer, encoder, "Encoder", epoch)
+        log_model_histograms(writer, discriminator, "Discriminator", epoch)
 
         if (epoch + 1) % epochs_to_save == 0:
             save_models(epoch, encoder, discriminator, scaler, checkpoint_dir)
@@ -468,6 +463,10 @@ if __name__ == "__main__":
     SHARPNESS = float(os.getenv("sharpness"))
     MESSAGE_SIZE = int(os.getenv("message_size"))
     PCT_START = float(os.getenv("pct_start"))
+    ADV_WEIGHT = float(os.getenv("adv_weight"))
+    IMG_WEIGHT = float(os.getenv("img_weight"))
+    EDGE_WEIGHT = float(os.getenv("edge_weight"))
+    DISC_WEIGHT = float(os.getenv("disc_weight"))
     RUN_NAME = os.getenv("RUN_NAME")
 
     CHECKPOINT_DIR = os.path.join(os.getenv("checkpoint_dir"), RUN_NAME)
@@ -497,6 +496,10 @@ if __name__ == "__main__":
         checkpoint_dir=CHECKPOINT_DIR,
         log_dir=LOG_DIR,
         message_size=MESSAGE_SIZE,
-        pct_start=PCT_START
+        pct_start=PCT_START,
+        adv_weight=ADV_WEIGHT,
+        img_weight=IMG_WEIGHT,
+        edge_weight=EDGE_WEIGHT,
+        disc_weight=DISC_WEIGHT
     )
 
