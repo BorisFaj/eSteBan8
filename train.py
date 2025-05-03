@@ -9,10 +9,11 @@ from tqdm import tqdm
 from image.discriminator import Discriminator
 from world.generator import Generator
 from image.mlflow_utils import log_gpu_stats, log_model_histograms, start_mlflow
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, random_split, Subset
 from dotenv import load_dotenv
 import math
 import torch.nn.functional as F
+
 
 def should_train_discriminator(
         disc_loss: float,
@@ -199,8 +200,12 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
             fake_pred = discriminator(fake_img)
             loss_gen = criterion(fake_pred, valid)
 
+        print("Loss gen:", loss_gen.item())  # Puede lanzar error si ya es NaN
+        print("Fake pred min/max/mean:", fake_pred.min().item(), fake_pred.max().item(), fake_pred.mean().item())
         opt_gen.zero_grad()
         scaler.scale(loss_gen).backward()
+        scaler.unscale_(opt_gen)
+        torch.nn.utils.clip_grad_norm_(generator.parameters(), max_norm=1.0)
         scaler.step(opt_gen)
         scaler.update()
         log_gpu_stats(mlflow=mlflow, epoch=epoch)
@@ -214,22 +219,42 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
 
     return avg_disc_loss, avg_gen_loss, fake_img.detach().cpu()
 
-def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, discriminator, train_loader, criterion,
-                opt_disc, opt_gen, checkpoint_dir, epochs_to_val, test_loader, disc_loss_target, sharpness, warm_up_len,
-                epochs_to_save):
+def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, discriminator, train_dataset,
+                criterion, opt_disc, opt_gen, checkpoint_dir, epochs_to_val, test_loader,
+                disc_loss_target, sharpness, warm_up_len, epochs_to_save, batch_size):
+
     writer = SummaryWriter(log_dir)
     writer.add_text("Entrenamiento", "Iniciado correctamente", 0)
     writer.flush()
 
     torch.autograd.set_detect_anomaly(True)
 
+    dataset_size = len(train_dataset)
+    samples_per_epoch = dataset_size // num_epochs
+    indices = torch.randperm(dataset_size)  # Mezcla aleatoria una vez
     disc_batches = 0
     train_discriminator = False
-    for epoch in range(start_epoch, num_epochs):
-        loss_disc, loss_gen, fake_img = train_step(device, epoch, generator, discriminator, train_loader, criterion, scaler, opt_disc, opt_gen, train_discriminator)
 
-        # Termina de entrenar este epoch
-        # Evalua si toca
+    for epoch in range(start_epoch, num_epochs):
+        # Elegimos los índices para esta epoch
+        start_idx = epoch * samples_per_epoch
+        end_idx = start_idx + samples_per_epoch
+        subset_indices = indices[start_idx:end_idx]
+
+        # Creamos dataloader con solo esa parte
+        train_loader = DataLoader(
+            Subset(train_dataset, subset_indices),
+            batch_size=batch_size,
+            shuffle=True,
+            pin_memory=True,
+            num_workers=4
+        )
+
+        loss_disc, loss_gen, fake_img = train_step(
+            device, epoch, generator, discriminator, train_loader,
+            criterion, scaler, opt_disc, opt_gen, train_discriminator
+        )
+
         if (epoch + 1) % epochs_to_val == 0:
             evaluate_step(generator, discriminator, test_loader, criterion, writer, device, epoch)
             print("Evaluando sobre el test wey")
@@ -239,29 +264,21 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
             gen_loss=loss_gen,
             writer=writer,
             epoch=epoch,
-            disc_loss_target=disc_loss_target,  # ToDo: bajarlo segun avanza el entrenamiento
+            disc_loss_target=disc_loss_target,
             sharpness=sharpness
         )
 
         if train_discriminator and not disc_train_next:
             print(f"🧠 [Discriminador]: Paro de entrenar. disc_loss: {loss_disc}")
             train_discriminator = False
-        else:  # si no se ha entrenado este epoch
+        else:
             if epoch > warm_up_len and disc_train_next:
                 print("🧠 [Discriminador]: empiezo a entrenar")
                 train_discriminator = True
                 disc_batches += 1
 
-        # Log y save
+        log_epoch(writer, epoch, loss_disc, loss_gen)
 
-        log_epoch(
-            writer=writer,
-            epoch=epoch,
-            loss_disc=loss_disc,
-            loss_gen=loss_gen,
-        )
-
-        # Visualización
         grid = make_grid((fake_img[:8].detach().cpu() + 1) / 2, nrow=4)
         writer.add_image("Fake", grid, epoch)
 
@@ -280,6 +297,7 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
           checkpoint_dir, log_dir, real_img_path, fake_img_path, batch_size, test_split, image_size, image_channels):
 
     dataset = PairedImageDataset(real_img_path, fake_img_path, image_size=image_size)
+    print("Tamaño del dataset:", len(dataset))
 
     test_size = int(len(dataset) * test_split)
     train_size = len(dataset) - test_size
@@ -287,7 +305,6 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
     torch.manual_seed(1984)
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, pin_memory=True, num_workers=4)
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
 
     generator = Generator(image_channels=image_channels, image_size=image_size).to(device)
@@ -322,9 +339,9 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
             device=device,
             start_epoch=0,
             num_epochs=num_epochs,
+            train_dataset=train_dataset,
             discriminator=discriminator,
             generator=generator,
-            train_loader=train_loader,
             criterion=criterion,
             opt_disc=opt_disc,
             opt_gen=opt_gen,
@@ -336,7 +353,8 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
             disc_loss_target=disc_loss_target,
             sharpness= sharpness,
             warm_up_len=warm_up_len,
-            epochs_to_save=epochs_to_save
+            epochs_to_save=epochs_to_save,
+            batch_size=batch_size
         )
 
 if __name__ == "__main__":
