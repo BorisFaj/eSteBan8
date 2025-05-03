@@ -390,6 +390,9 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             evaluate_step(encoder, discriminator, test_loader, writer, device, epoch)
             print("Evaluando sobre el test wey")
 
+        if train_discriminator:
+            disc_batches += 1
+
         avg_disc_loss = total_disc_loss / max(1, disc_batches)
         avg_adv_loss = total_adv_loss / num_batches
 
@@ -409,7 +412,6 @@ def train_model(device, start_epoch, num_epochs, train_loader, test_loader, enco
             if epoch > warm_up_len and disc_train_next:
                 print("🧠 [Discriminador]: empiezo a entrenar")
                 train_discriminator = True
-                disc_batches += 1
 
         # Log y save
         current_lr_enc_dec = scheduler_enc_dec.get_last_lr()[0]
