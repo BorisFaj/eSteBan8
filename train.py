@@ -13,6 +13,7 @@ from torch.utils.data import DataLoader, random_split, Subset
 from dotenv import load_dotenv
 import math
 import torch.nn.functional as F
+from ultralytics import YOLO
 
 
 def should_train_discriminator(
@@ -128,7 +129,7 @@ def save_models(epoch, encoder, discriminator, scaler, checkpoint_dir):
     mlflow.log_artifact(latest_path)
     print(f"✅ Modelos guardados correctamente en {path}")
 
-def evaluate_step(generator, discriminator, test_loader, criterion, writer, device, epoch):
+def evaluate_step(generator, discriminator, test_loader, criterion, writer, device, epoch, face_detector_model):
     generator.eval()
     discriminator.eval()
 
@@ -138,19 +139,22 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
     with torch.no_grad():
         for step_n, (x, real_img) in enumerate(test_loader):
             x, real_img = x.to(device), real_img.to(device)
-            fake = torch.zeros((x.size(0), 1), device=device)
 
             with torch.amp.autocast(device_type="cuda"):
                 fake_img = generator(x)
-                real_pred = discriminator(real_img)
-                fake_pred = discriminator(fake_img.detach())
-                valid = torch.ones_like(fake_pred)
-                loss_disc = criterion(real_pred, valid) + criterion(fake_pred, fake)
-
-            with torch.amp.autocast(device_type="cuda"):
                 fake_pred = discriminator(fake_img)
-                fake_pred = torch.clamp(fake_pred, min=-10, max=10)
-                loss_gen = criterion(fake_pred, valid)
+
+                # Usamos el detector YOLO para obtener las “etiquetas objetivo”
+                yolo_targets = yolo_face_score(fake_img, face_detector_model)
+
+                # Evaluamos si el generador está engañando a YOLO
+                loss_gen = criterion(fake_pred, yolo_targets)
+
+                # Discriminador sigue con su lógica clásica
+                real_pred = discriminator(real_img)
+                fake_pred_detach = discriminator(fake_img.detach())
+                loss_disc = criterion(real_pred, torch.ones_like(real_pred)) + \
+                            criterion(fake_pred_detach, torch.zeros_like(fake_pred_detach))
 
             total_gen_loss += loss_gen
             total_disc_loss += loss_disc
@@ -184,10 +188,17 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
         writer.add_image("Test/Fake_vs_Real_DiffMap", diff_map[0], epoch)
         writer.add_image("Test/NormalizedDiffMap", norm_diff[0], epoch)
 
+        mask = yolo_targets.squeeze().bool()
+        detected_images = fake_images_01[mask][:8]
+        if len(detected_images) > 0:
+            grid_detected = make_grid(detected_images.cpu(), nrow=4)
+            writer.add_image("Test/Detected_by_YOLO", grid_detected, epoch)
+
     generator.train()
     discriminator.train()
 
-def train_step(device, epoch, generator, discriminator, dataloader, criterion, scaler, opt_disc, opt_gen, train_discriminator):
+def train_step(device, epoch, generator, discriminator, dataloader, criterion, scaler, opt_disc, opt_gen,
+               train_discriminator, face_detector_model):
     generator.train()
     discriminator.train()
     pbar = tqdm(dataloader)
@@ -212,10 +223,12 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
         with torch.amp.autocast(device_type="cuda"):
             fake_img = generator(x)
             fake_pred = discriminator(fake_img)
-            valid = torch.ones_like(fake_pred)
+
+            with torch.no_grad():
+                yolo_targets = yolo_face_score(fake_img, face_detector_model)  # 1.0 si hay cara, 0.0 si no
 
             fake_pred = torch.clamp(fake_pred, min=-10, max=10)
-            loss_gen = criterion(fake_pred, valid)
+            loss_gen = F.binary_cross_entropy_with_logits(fake_pred, yolo_targets)
 
         print("Loss gen:", loss_gen.item())  # Puede lanzar error si ya es NaN
         print("Loss disc:", loss_disc.item())  # Puede lanzar error si ya es NaN
@@ -239,7 +252,7 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
 
 def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, discriminator, train_dataset,
                 criterion, opt_disc, opt_gen, checkpoint_dir, epochs_to_val, test_loader,
-                disc_loss_target, sharpness, warm_up_len, epochs_to_save, batch_size):
+                disc_loss_target, sharpness, warm_up_len, epochs_to_save, batch_size, face_detector_model):
 
     writer = SummaryWriter(log_dir)
     writer.add_text("Entrenamiento", "Iniciado correctamente", 0)
@@ -269,11 +282,11 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
 
         loss_disc, loss_gen, fake_img = train_step(
             device, epoch, generator, discriminator, train_loader,
-            criterion, scaler, opt_disc, opt_gen, train_discriminator
+            criterion, scaler, opt_disc, opt_gen, train_discriminator, face_detector_model
         )
 
         if (epoch + 1) % epochs_to_val == 0:
-            evaluate_step(generator, discriminator, test_loader, criterion, writer, device, epoch)
+            evaluate_step(generator, discriminator, test_loader, criterion, writer, device, epoch, face_detector_model)
             print("Evaluando sobre el test wey")
 
         disc_train_next = should_train_discriminator(
@@ -309,8 +322,17 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
     mlflow.end_run()
     writer.close()
 
+def yolo_face_score(img_batch, model):
+    scores = []
+    for img_tensor in img_batch:
+        img_np = ((img_tensor.detach().cpu().numpy().transpose(1, 2, 0) + 1) * 127.5).astype("uint8")
+        results = model.predict(img_np, verbose=False)
+        detected = len(results[0].boxes) > 0
+        scores.append([1.0 if detected else 0.0])
+    return torch.tensor(scores, device=img_batch.device, dtype=torch.float32)
+
 def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_loss_target, sharpness, run_name,
-          checkpoint_dir, log_dir, real_img_path, fake_img_path, batch_size, test_split, image_size, image_channels):
+          checkpoint_dir, log_dir, real_img_path, fake_img_path, batch_size, test_split, image_size, image_channels, yolo_face_path):
 
     dataset = PairedImageDataset(real_img_path, fake_img_path, image_size=image_size)
     print("Tamaño del dataset:", len(dataset))
@@ -323,6 +345,7 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
 
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
 
+    yolo_face_detector = YOLO(yolo_face_path).to(device).eval()
     generator = Generator(image_channels=image_channels, image_size=image_size).to(device)
     discriminator = Discriminator(image_channels=image_channels).to(device)
 
@@ -370,7 +393,8 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
             sharpness= sharpness,
             warm_up_len=warm_up_len,
             epochs_to_save=epochs_to_save,
-            batch_size=batch_size
+            batch_size=batch_size,
+            face_detector_model=yolo_face_detector
         )
 
 if __name__ == "__main__":
@@ -398,12 +422,15 @@ if __name__ == "__main__":
     IMAGE_INPUT_RES = int(os.getenv("IMAGE_INPUT_RES"))
     FAKE_IMG_PATH = os.getenv("fake_img_path")
     REAL_IMG_PATH = os.getenv("real_img_path")
+    OPEN_IMG_PATH = os.getenv("open_images_path")
+    YOLO_FACE_PATH = os.getenv("yolo_face_path")
     TEST_SPLIT = float(os.getenv("TEST_SPLIT"))
 
     CHECKPOINT_DIR = os.path.join(os.getenv("checkpoint_dir"), RUN_NAME)
     LOG_DIR = os.path.join(os.getenv("log_dir"), RUN_NAME)
     os.makedirs(LOG_DIR, exist_ok=True)
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -423,6 +450,7 @@ if __name__ == "__main__":
         fake_img_path=FAKE_IMG_PATH,
         test_split=TEST_SPLIT,
         image_size=IMAGE_SIZE,
-        image_channels=IMAGE_CHANNELS
+        image_channels=IMAGE_CHANNELS,
+        yolo_face_path=YOLO_FACE_PATH
     )
 
