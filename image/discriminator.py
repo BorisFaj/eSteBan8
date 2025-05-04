@@ -30,7 +30,7 @@ class Discriminator(nn.Module):
         x = x.view(B, -1)
 
         if self.fc is None:
-            self.fc = nn.Linear(C * H * W, 1).to(x.device).half()
+            self.fc = nn.Linear(C * H * W, 1).to(x.device)
             init.kaiming_normal_(self.fc.weight, nonlinearity='leaky_relu')
             init.constant_(self.fc.bias, 0)
 
