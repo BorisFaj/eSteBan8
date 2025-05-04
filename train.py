@@ -83,16 +83,16 @@ def calc_disc_loss(device, discriminator, real_image, fake_image, criterion):
 
     with torch.amp.autocast(device_type="cuda"):
         real_pred = discriminator(real_image)
-        fake_pred = discriminator(fake_image)
+        fake_pred = discriminator(fake_image.detach())
         valid = torch.ones_like(fake_pred)
         loss_disc = criterion(real_pred, valid) + criterion(fake_pred, fake)
 
-    return loss_disc, valid
+    return loss_disc
 
 def discriminator_step(device, criterion, discriminator, disc_opt, scaler, real_image, fake_image, train):
 
-    disc_loss, valid = calc_disc_loss(device=device, discriminator=discriminator, real_image=real_image,
-                                      fake_image=fake_image, criterion=criterion)
+    disc_loss = calc_disc_loss(device=device, discriminator=discriminator, real_image=real_image,
+                               fake_image=fake_image, criterion=criterion)
 
     if train:
         disc_opt.zero_grad()
@@ -102,7 +102,7 @@ def discriminator_step(device, criterion, discriminator, disc_opt, scaler, real_
         scaler.step(disc_opt)
         scaler.update()
 
-    return disc_loss, valid
+    return disc_loss
 
 def log_epoch(writer, epoch, loss_disc, loss_gen):
     writer.add_scalar("Loss/Discriminator", loss_disc.item(), epoch)
@@ -149,12 +149,6 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
 
             with torch.amp.autocast(device_type="cuda"):
                 fake_pred = discriminator(fake_img)
-                if torch.isnan(fake_pred).any() or torch.isinf(fake_pred).any():
-                    print("🛑 fake_pred contiene NaN o Inf")
-                    print("fake_pred:", fake_pred)
-                    print("valid:", valid)
-                    continue  # o return para salir de la iteración
-
                 fake_pred = torch.clamp(fake_pred, min=-10, max=10)
                 loss_gen = criterion(fake_pred, valid)
 
@@ -187,8 +181,6 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
         diff_map = ((_fake[:1] - img[:1]) ** 2).mean(dim=1, keepdim=True)
         norm_diff = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8)
 
-        writer.add_image("Test/Real", img[0].cpu(), epoch)
-        writer.add_image("Test/Fake", _fake[0].cpu(), epoch)
         writer.add_image("Test/Fake_vs_Real_DiffMap", diff_map[0], epoch)
         writer.add_image("Test/NormalizedDiffMap", norm_diff[0], epoch)
 
@@ -207,7 +199,7 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
         with torch.no_grad():
             fake_img_disc = generator(x)
 
-        loss_disc, valid = discriminator_step(
+        loss_disc = discriminator_step(
             device=device,
             criterion=criterion,
             discriminator=discriminator,
@@ -220,23 +212,13 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
         with torch.amp.autocast(device_type="cuda"):
             fake_img = generator(x)
             fake_pred = discriminator(fake_img)
-
-            # Check for NaNs or Infs **before** clamp and loss
-            if torch.isnan(fake_pred).any() or torch.isinf(fake_pred).any():
-                print("🛑 fake_pred contiene NaN o Inf antes del clamp")
-                print("fake_pred stats:", fake_pred.min().item(), fake_pred.max().item(), fake_pred.mean().item())
-                raise Exception("wtf")
+            valid = torch.ones_like(fake_pred)
 
             fake_pred = torch.clamp(fake_pred, min=-10, max=10)
             loss_gen = criterion(fake_pred, valid)
 
-            if torch.isnan(loss_gen).any():
-                print("🛑 loss_gen contiene NaN")
-                print("fake_pred:", fake_pred)
-                print("valid:", valid)
-                raise Exception("wtf")
-
         print("Loss gen:", loss_gen.item())  # Puede lanzar error si ya es NaN
+        print("Loss disc:", loss_disc.item())  # Puede lanzar error si ya es NaN
         print("Fake pred min/max/mean:", fake_pred.min().item(), fake_pred.max().item(), fake_pred.mean().item())
         opt_gen.zero_grad()
         scaler.scale(loss_gen).backward()
@@ -268,7 +250,6 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
     dataset_size = len(train_dataset)
     samples_per_epoch = dataset_size // num_epochs
     indices = torch.randperm(dataset_size)  # Mezcla aleatoria una vez
-    disc_batches = 0
     train_discriminator = False
 
     for epoch in range(start_epoch, num_epochs):
@@ -311,7 +292,6 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
             if epoch > warm_up_len and disc_train_next:
                 print("🧠 [Discriminador]: empiezo a entrenar")
                 train_discriminator = True
-                disc_batches += 1
 
         log_epoch(writer, epoch, loss_disc, loss_gen)
 
@@ -346,8 +326,8 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
     generator = Generator(image_channels=image_channels, image_size=image_size).to(device)
     discriminator = Discriminator(image_channels=image_channels).to(device)
 
-    # generator = torch.compile(generator)
-    # discriminator = torch.compile(discriminator)
+    generator = torch.compile(generator)
+    discriminator = torch.compile(discriminator)
 
     opt_gen = torch.optim.Adam(generator.parameters(), lr=2e-4, betas=(0.5, 0.999))
     opt_disc = torch.optim.Adam(discriminator.parameters(), lr=2e-4, betas=(0.5, 0.999))
