@@ -138,21 +138,21 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
     total_disc_loss = 0
 
     with torch.no_grad():
-        for step_n, (orig_x, real_img) in enumerate(test_loader):
-            orig_x, real_img = orig_x.to(device), real_img.to(device)
+        for step_n, (world_img, face_img) in enumerate(test_loader):
+            world_img, face_img = world_img.to(device), face_img.to(device)
 
             with torch.amp.autocast(device_type="cuda"):
-                gen_img = generator(orig_x)
+                gen_img = generator(world_img)
                 gen_pred = discriminator(gen_img)
 
                 # Usamos el detector YOLO para obtener las “etiquetas objetivo”
-                yolo_targets = yolo_face_score(orig_x, face_detector_model)
+                yolo_targets = yolo_face_score(world_img, face_detector_model)
 
                 # Evaluamos si el generador está engañando a YOLO
                 loss_gen = criterion(gen_pred, yolo_targets)
 
                 # Discriminador sigue con su lógica clásica
-                real_pred = discriminator(real_img)
+                real_pred = discriminator(face_img)
                 gen_pred_detach = discriminator(gen_img.detach())
                 loss_disc = criterion(real_pred, torch.ones_like(real_pred)) + \
                             criterion(gen_pred_detach, torch.zeros_like(gen_pred_detach))
@@ -173,13 +173,13 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
 
         # Imágenes
         if epoch == (epochs_to_val - 1):  # solo la primera vez, estas no cambian
-            real_images_01 = (real_img + 1) / 2
+            real_images_01 = (face_img + 1) / 2
             img_grid_real = make_grid(real_images_01[:8].cpu().detach(), nrow=4, normalize=True)
-            writer.add_image("Test/Images/Real", img_grid_real, epoch)
+            writer.add_image("Test/Images/Caras", img_grid_real, epoch)
 
-            original_images_01 = (orig_x + 1) / 2
+            original_images_01 = (world_img + 1) / 2
             img_grid_original = make_grid(original_images_01[:8].cpu().detach(), nrow=4, normalize=True)
-            writer.add_image("Test/Images/Original", img_grid_original, epoch)
+            writer.add_image("Test/Images/World", img_grid_original, epoch)
 
         gen_images_01 = (gen_img + 1) / 2
         img_grid_gen = make_grid(gen_images_01[:8].cpu(), nrow=4, normalize=True)
@@ -187,7 +187,7 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
         writer.add_image("Test/Images/Generated", img_grid_gen, epoch)
 
         # Debug de diferencias entre originales-generadas
-        img = real_img[:2]  # coge dos imágenes del batch
+        img = face_img[:2]  # coge dos imágenes del batch
         _gen = gen_img[:2]
 
         diff_map = ((_gen[:1] - img[:1]) ** 2).mean(dim=1, keepdim=True)
@@ -287,7 +287,7 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
             pin_memory=True,
             num_workers=4
         )
-        loss_disc, loss_gen, gen_img, orig_x = train_step(
+        loss_disc, loss_gen, gen_img, world_img = train_step(
             device, epoch, generator, discriminator, train_loader,
             criterion, scaler, opt_disc, opt_gen, train_discriminator, face_detector_model
         )
@@ -318,9 +318,9 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
         log_epoch(writer, epoch, loss_disc, loss_gen)
 
         grid_gen = make_grid((gen_img[:8].detach().cpu() + 1) / 2, nrow=4)
-        grid_orig = make_grid((orig_x[:8].detach().cpu() + 1) / 2, nrow=4)
+        grid_world = make_grid((world_img[:8].detach().cpu() + 1) / 2, nrow=4)
         writer.add_image("Images/Generated", grid_gen, epoch)
-        writer.add_image("Images/Original", grid_orig, epoch)
+        writer.add_image("Images/World", grid_world, epoch)
 
         log_model_histograms(writer, generator, "Generator", epoch)
         log_model_histograms(writer, discriminator, "Discriminator", epoch)
@@ -343,12 +343,12 @@ def yolo_face_score(img_batch, model):
     return torch.tensor(scores, device=img_batch.device, dtype=torch.float32)
 
 def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_loss_target, sharpness, run_name,
-          checkpoint_dir, log_dir, faces_img_path, no_faces_img_path, batch_size, test_split, image_size, image_channels, yolo_face_path,
-          real_faces_img_path):
+          checkpoint_dir, log_dir, real_faces_img_path, world_faces_img_path, batch_size, test_split, image_size,
+          image_channels, yolo_face_path, world_no_faces_img_path):
 
     dataset = WorldToFaceDataset(
-        faces_dir=faces_img_path,
-        no_faces_dir=no_faces_img_path,
+        faces_dir=world_faces_img_path,
+        no_faces_dir=world_no_faces_img_path,
         real_faces_dir=real_faces_img_path,
         image_size=image_size
     )
@@ -439,11 +439,11 @@ if __name__ == "__main__":
     PCT_START = float(os.getenv("pct_start"))
     IMAGE_INPUT_RES = int(os.getenv("IMAGE_INPUT_RES"))
 
-    OPEN_IMG_FACES_PATH = os.getenv("real_img_path")
+    OPEN_IMG_FACES_PATH = os.getenv("open_images_faces_path")
 
     OPEN_IMG_NO_FACES_PATH = os.getenv("open_images_no_faces_path")
 
-    REAL_FACES_PATH = os.getenv("open_images_faces_path")
+    REAL_FACES_PATH = os.getenv("real_img_path")
 
     YOLO_FACE_PATH = os.getenv("yolo_face_path")
     TEST_SPLIT = float(os.getenv("TEST_SPLIT"))
@@ -468,8 +468,8 @@ if __name__ == "__main__":
         run_name=RUN_NAME,
         checkpoint_dir=CHECKPOINT_DIR,
         log_dir=LOG_DIR,
-        no_faces_img_path=OPEN_IMG_NO_FACES_PATH,
-        faces_img_path=OPEN_IMG_FACES_PATH,
+        world_faces_img_path=OPEN_IMG_NO_FACES_PATH,
+        world_no_faces_img_path=OPEN_IMG_FACES_PATH,
         real_faces_img_path=REAL_FACES_PATH,
         test_split=TEST_SPLIT,
         image_size=IMAGE_SIZE,
