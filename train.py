@@ -1,13 +1,13 @@
 import torch
 from torch import nn
-from world.data_handler import WorldToFaceDataset
 from torchvision.utils import make_grid
 from torch.utils.tensorboard import SummaryWriter
 import mlflow
+from world.data_handler import WorldToFaceDataset
 import os
 from tqdm import tqdm
 from image.discriminator import Discriminator
-from world.generator import Generator
+from world.generator_unet import GeneratorUNetCompact
 from image.mlflow_utils import log_gpu_stats, log_model_histograms, start_mlflow
 from torch.utils.data import DataLoader, random_split, Subset
 from dotenv import load_dotenv
@@ -238,9 +238,6 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
             gen_pred = torch.clamp(gen_pred, min=-10, max=10)
             loss_gen = F.binary_cross_entropy_with_logits(gen_pred, yolo_targets)
 
-        print("Loss gen:", loss_gen.item())  # Puede lanzar error si ya es NaN
-        print("Loss disc:", loss_disc.item())  # Puede lanzar error si ya es NaN
-        print("Gen pred min/max/mean:", gen_pred.min().item(), gen_pred.max().item(), gen_pred.mean().item())
         opt_gen.zero_grad()
         scaler.scale(loss_gen).backward()
         scaler.unscale_(opt_gen)
@@ -345,7 +342,6 @@ def yolo_face_score(img_batch, model):
 def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_loss_target, sharpness, run_name,
           checkpoint_dir, log_dir, real_faces_img_path, batch_size, test_split, image_size,
           image_channels, yolo_face_path, world_no_faces_img_path):
-    from world.data_handler import WorldToFaceDataset
 
     dataset = WorldToFaceDataset(
         faces_dir=real_faces_img_path,
@@ -364,7 +360,7 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
 
     yolo_face_detector = YOLO(yolo_face_path).to(device).eval()
-    generator = Generator(image_channels=image_channels, image_size=image_size).to(device)
+    generator = GeneratorUNetCompact(image_channels=image_channels).to(device)
     discriminator = Discriminator(image_channels=image_channels).to(device)
 
     generator = torch.compile(generator)
