@@ -12,4 +12,4 @@ fiftyone
 python-dotenv
 mlflow
 pynvml
-face_recognition
+ultralytics
