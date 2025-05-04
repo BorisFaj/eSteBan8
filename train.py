@@ -1,6 +1,6 @@
 import torch
 from torch import nn
-from world.data_handler import PairedImageDataset
+from world.data_handler import WorldToFaceDataset
 from torchvision.utils import make_grid
 from torch.utils.tensorboard import SummaryWriter
 import mlflow
@@ -90,10 +90,10 @@ def calc_disc_loss(device, discriminator, real_image, fake_image, criterion):
 
     return loss_disc
 
-def discriminator_step(device, criterion, discriminator, disc_opt, scaler, real_image, original_image, train):
+def discriminator_step(device, criterion, discriminator, disc_opt, scaler, face_image, generated_image, train):
 
-    disc_loss = calc_disc_loss(device=device, discriminator=discriminator, real_image=real_image,
-                               fake_image=original_image, criterion=criterion)
+    disc_loss = calc_disc_loss(device=device, discriminator=discriminator, real_image=face_image,
+                               fake_image=generated_image, criterion=criterion)
 
     if train:
         disc_opt.zero_grad()
@@ -212,11 +212,11 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
     pbar = tqdm(dataloader)
     total_loss_disc = 0
     total_loss_gen = 0
-    for step_n, (orig_img, real_img) in enumerate(pbar):
-        orig_img, real_img = orig_img.to(device), real_img.to(device)
+    for step_n, (world_img, face_img) in enumerate(pbar):
+        world_img, face_img = world_img.to(device), face_img.to(device)
 
         with torch.no_grad():
-            fake_img_disc = generator(orig_img)
+            _disc_gen_img = generator(world_img)
 
         loss_disc = discriminator_step(
             device=device,
@@ -224,12 +224,12 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
             discriminator=discriminator,
             disc_opt=opt_disc,
             scaler=scaler,
-            real_image=real_img,
-            original_image=fake_img_disc,
+            face_image=face_img,
+            generated_image=_disc_gen_img,
             train=train_discriminator)
 
         with torch.amp.autocast(device_type="cuda"):
-            gen_img = generator(orig_img)
+            gen_img = generator(world_img)
             gen_pred = discriminator(gen_img)
 
             with torch.no_grad():
@@ -256,7 +256,7 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
     avg_disc_loss = total_loss_disc / len(dataloader)
     avg_gen_loss = total_loss_gen / len(dataloader)
 
-    return avg_disc_loss, avg_gen_loss, gen_img.detach().cpu(), orig_img.detach().cpu()
+    return avg_disc_loss, avg_gen_loss, gen_img.detach().cpu(), world_img.detach().cpu()
 
 def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, discriminator, train_dataset,
                 criterion, opt_disc, opt_gen, checkpoint_dir, epochs_to_val, test_loader,
@@ -343,9 +343,16 @@ def yolo_face_score(img_batch, model):
     return torch.tensor(scores, device=img_batch.device, dtype=torch.float32)
 
 def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_loss_target, sharpness, run_name,
-          checkpoint_dir, log_dir, faces_img_path, original_img_path, batch_size, test_split, image_size, image_channels, yolo_face_path):
+          checkpoint_dir, log_dir, faces_img_path, no_faces_img_path, batch_size, test_split, image_size, image_channels, yolo_face_path,
+          real_faces_img_path):
 
-    dataset = PairedImageDataset(original_img_path, faces_img_path, image_size=image_size)
+    dataset = WorldToFaceDataset(
+        faces_dir=faces_img_path,
+        no_faces_dir=no_faces_img_path,
+        real_faces_dir=real_faces_img_path,
+        image_size=image_size
+    )
+
     print("Tamaño del dataset:", len(dataset))
 
     test_size = int(len(dataset) * test_split)
@@ -431,8 +438,13 @@ if __name__ == "__main__":
     SHARPNESS = float(os.getenv("sharpness"))
     PCT_START = float(os.getenv("pct_start"))
     IMAGE_INPUT_RES = int(os.getenv("IMAGE_INPUT_RES"))
-    REAL_IMG_PATH = os.getenv("real_img_path")
-    OPEN_IMG_PATH = os.getenv("open_images_path")
+
+    OPEN_IMG_FACES_PATH = os.getenv("real_img_path")
+
+    OPEN_IMG_NO_FACES_PATH = os.getenv("open_images_no_faces_path")
+
+    REAL_FACES_PATH = os.getenv("open_images_faces_path")
+
     YOLO_FACE_PATH = os.getenv("yolo_face_path")
     TEST_SPLIT = float(os.getenv("TEST_SPLIT"))
 
@@ -456,8 +468,9 @@ if __name__ == "__main__":
         run_name=RUN_NAME,
         checkpoint_dir=CHECKPOINT_DIR,
         log_dir=LOG_DIR,
-        faces_img_path=REAL_IMG_PATH,
-        original_img_path=OPEN_IMG_PATH,
+        no_faces_img_path=OPEN_IMG_NO_FACES_PATH,
+        faces_img_path=OPEN_IMG_FACES_PATH,
+        real_faces_img_path=REAL_FACES_PATH,
         test_split=TEST_SPLIT,
         image_size=IMAGE_SIZE,
         image_channels=IMAGE_CHANNELS,

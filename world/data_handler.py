@@ -1,40 +1,45 @@
-import os
-from PIL import Image
-from torch.utils.data import Dataset
 from torchvision import transforms
+from PIL import Image
+import os
+import random
+import torch
 
-
-class PairedImageDataset(Dataset):
-    def __init__(self, real_dir, fake_dir, image_size=224):
-        self.real_dir = real_dir
-        self.fake_dir = fake_dir
-        self.image_size = image_size
-
-        self.real_img_paths = sorted([
-            os.path.join(real_dir, f)
-            for f in os.listdir(real_dir)
-            if f.lower().endswith(('.jpg', '.jpeg', '.png'))
-        ])
-        self.fake_img_paths = sorted([
-            os.path.join(fake_dir, f)
-            for f in os.listdir(fake_dir)
-            if f.lower().endswith(('.jpg', '.jpeg', '.png'))
-        ])
-        # Recortar hasta el mínimo común
-        min_len = min(len(self.real_img_paths), len(self.fake_img_paths))
-        self.real_img_paths = self.real_img_paths[:min_len]
-        self.fake_img_paths = self.fake_img_paths[:min_len]
-
+class WorldToFaceDataset(torch.utils.data.Dataset):
+    def __init__(self, faces_dir, no_faces_dir, real_faces_dir, image_size):
         self.transform = transforms.Compose([
             transforms.Resize((image_size, image_size)),
             transforms.ToTensor(),
-            transforms.Normalize([0.5]*3, [0.5]*3)
+            transforms.Normalize([0.5] * 3, [0.5] * 3)
         ])
 
+        self.input_samples = []
+
+        for path in os.listdir(faces_dir):
+            self.input_samples.append(os.path.join(faces_dir, path))
+
+        for path in os.listdir(no_faces_dir):
+            self.input_samples.append(os.path.join(no_faces_dir, path))
+
+        self.real_faces = sorted([
+            os.path.join(real_faces_dir, path)
+            for path in os.listdir(real_faces_dir)
+        ])
+
+        self.image_size = image_size
+        random.shuffle(self.input_samples)
+
     def __len__(self):
-        return len(self.real_img_paths)
+        return len(self.input_samples)
 
     def __getitem__(self, idx):
-        real_img = Image.open(self.real_img_paths[idx]).convert("RGB")
-        fake_img = Image.open(self.fake_img_paths[idx]).convert("RGB")
-        return self.transform(real_img), self.transform(fake_img)
+        # Imagen de entrada (puede tener cara o no)
+        input_path = self.input_samples[idx]
+        input_img = Image.open(input_path).convert("RGB")
+        input_tensor = self.transform(input_img)
+
+        # Imagen real de cara (sample aleatorio)
+        real_face_path = random.choice(self.real_faces)
+        real_img = Image.open(real_face_path).convert("RGB")
+        real_tensor = self.transform(real_img)
+
+        return input_tensor, real_tensor
