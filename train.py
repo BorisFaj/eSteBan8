@@ -343,13 +343,13 @@ def yolo_face_score(img_batch, model):
     return torch.tensor(scores, device=img_batch.device, dtype=torch.float32)
 
 def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_loss_target, sharpness, run_name,
-          checkpoint_dir, log_dir, real_faces_img_path, world_faces_img_path, batch_size, test_split, image_size,
+          checkpoint_dir, log_dir, real_faces_img_path, batch_size, test_split, image_size,
           image_channels, yolo_face_path, world_no_faces_img_path):
+    from world.data_handler import WorldToFaceDataset
 
     dataset = WorldToFaceDataset(
-        faces_dir=world_faces_img_path,
+        faces_dir=real_faces_img_path,
         no_faces_dir=world_no_faces_img_path,
-        real_faces_dir=real_faces_img_path,
         image_size=image_size
     )
 
@@ -439,7 +439,7 @@ if __name__ == "__main__":
     PCT_START = float(os.getenv("pct_start"))
     IMAGE_INPUT_RES = int(os.getenv("IMAGE_INPUT_RES"))
 
-    OPEN_IMG_FACES_PATH = os.getenv("open_images_faces_path")
+    # OPEN_IMG_FACES_PATH = os.getenv("open_images_faces_path")
 
     OPEN_IMG_NO_FACES_PATH = os.getenv("open_images_no_faces_path")
 
@@ -468,8 +468,7 @@ if __name__ == "__main__":
         run_name=RUN_NAME,
         checkpoint_dir=CHECKPOINT_DIR,
         log_dir=LOG_DIR,
-        world_faces_img_path=OPEN_IMG_NO_FACES_PATH,
-        world_no_faces_img_path=OPEN_IMG_FACES_PATH,
+        world_no_faces_img_path=OPEN_IMG_NO_FACES_PATH,
         real_faces_img_path=REAL_FACES_PATH,
         test_split=TEST_SPLIT,
         image_size=IMAGE_SIZE,
