@@ -129,7 +129,8 @@ def save_models(epoch, encoder, discriminator, scaler, checkpoint_dir):
     mlflow.log_artifact(latest_path)
     print(f"✅ Modelos guardados correctamente en {path}")
 
-def evaluate_step(generator, discriminator, test_loader, criterion, writer, device, epoch, face_detector_model):
+def evaluate_step(generator, discriminator, test_loader, criterion, writer, device, epoch, face_detector_model,
+                  epochs_to_val):
     generator.eval()
     discriminator.eval()
 
@@ -171,12 +172,19 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
         writer.add_scalar("Test/Loss/Adversarial", avg_adv_loss, epoch)
 
         # Imágenes
-        real_images_01 = (real_img + 1) / 2
+        if epoch == epochs_to_val:  # solo la primera vez, estas no cambian
+            real_images_01 = (real_img + 1) / 2
+            img_grid_real = make_grid(real_images_01[:8].cpu().detach(), nrow=4, normalize=True)
+            writer.add_image("Test/Images/Real", img_grid_real, epoch)
+
+            original_images_01 = (x + 1) / 2
+            img_grid_original = make_grid(original_images_01[:8].cpu().detach(), nrow=4, normalize=True)
+            writer.add_image("Test/Images/Original", img_grid_original, epoch)
+
         fake_images_01 = (fake_img + 1) / 2
-        img_grid_real = make_grid(real_images_01[:8].cpu().detach(), nrow=4, normalize=True)
         img_grid_fake = make_grid(fake_images_01[:8].cpu(), nrow=4, normalize=True)
-        writer.add_image("Test/Images/Real", img_grid_real, epoch)
-        writer.add_image("Test/Images/Fake", img_grid_fake, epoch)
+
+        writer.add_image("Test/Images/Generated", img_grid_fake, epoch)
 
         # Debug de diferencias entre fake-images
         img = real_img[:2]  # coge dos imágenes del batch
@@ -185,8 +193,8 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
         diff_map = ((_fake[:1] - img[:1]) ** 2).mean(dim=1, keepdim=True)
         norm_diff = (diff_map - diff_map.min()) / (diff_map.max() - diff_map.min() + 1e-8)
 
-        writer.add_image("Test/Fake_vs_Real_DiffMap", diff_map[0], epoch)
-        writer.add_image("Test/NormalizedDiffMap", norm_diff[0], epoch)
+        writer.add_image("Test/Images/Generated_vs_Real_DiffMap", diff_map[0], epoch)
+        writer.add_image("Test/Images/NormalizedDiffMap", norm_diff[0], epoch)
 
         mask = yolo_targets.squeeze().bool()
         detected_images = fake_images_01[mask][:8]
@@ -248,7 +256,7 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
     avg_disc_loss = total_loss_disc / len(dataloader)
     avg_gen_loss = total_loss_gen / len(dataloader)
 
-    return avg_disc_loss, avg_gen_loss, fake_img.detach().cpu()
+    return avg_disc_loss, avg_gen_loss, fake_img.detach().cpu(), x.detach().cpu()
 
 def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, discriminator, train_dataset,
                 criterion, opt_disc, opt_gen, checkpoint_dir, epochs_to_val, test_loader,
@@ -280,13 +288,14 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
             num_workers=4
         )
 
-        loss_disc, loss_gen, fake_img = train_step(
+        loss_disc, loss_gen, fake_img, orig_x = train_step(
             device, epoch, generator, discriminator, train_loader,
             criterion, scaler, opt_disc, opt_gen, train_discriminator, face_detector_model
         )
 
         if (epoch + 1) % epochs_to_val == 0:
-            evaluate_step(generator, discriminator, test_loader, criterion, writer, device, epoch, face_detector_model)
+            evaluate_step(generator, discriminator, test_loader, criterion, writer, device, epoch, face_detector_model,
+                          epochs_to_val)
             print("Evaluando sobre el test wey")
 
         disc_train_next = should_train_discriminator(
@@ -303,13 +312,16 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
             train_discriminator = False
         else:
             if epoch > warm_up_len and disc_train_next:
-                print("🧠 [Discriminador]: empiezo a entrenar")
+                if not train_discriminator:
+                    print("🧠 [Discriminador]: empiezo a entrenar")  # si ya estaba entrenando, no logeo
                 train_discriminator = True
 
         log_epoch(writer, epoch, loss_disc, loss_gen)
 
-        grid = make_grid((fake_img[:8].detach().cpu() + 1) / 2, nrow=4)
-        writer.add_image("Fake", grid, epoch)
+        grid_fake = make_grid((fake_img[:8].detach().cpu() + 1) / 2, nrow=4)
+        grid_orig = make_grid((orig_x[:8].detach().cpu() + 1) / 2, nrow=4)
+        writer.add_image("Images/Generated", grid_fake, epoch)
+        writer.add_image("Images/Original", grid_orig, epoch)
 
         log_model_histograms(writer, generator, "Generator", epoch)
         log_model_histograms(writer, discriminator, "Discriminator", epoch)
