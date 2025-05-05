@@ -146,7 +146,7 @@ def evaluate_step(generator, discriminator, test_loader, criterion, writer, devi
                 gen_pred = discriminator(gen_img)
 
                 # Usamos el detector YOLO para obtener las “etiquetas objetivo”
-                yolo_targets = yolo_face_score(world_img, face_detector_model)
+                yolo_targets = yolo_face_score(gen_img, face_detector_model)
 
                 # Evaluamos si el generador está engañando a YOLO
                 loss_gen = criterion(gen_pred, yolo_targets)
@@ -253,7 +253,7 @@ def train_step(device, epoch, generator, discriminator, dataloader, criterion, s
     avg_disc_loss = total_loss_disc / len(dataloader)
     avg_gen_loss = total_loss_gen / len(dataloader)
 
-    return avg_disc_loss, avg_gen_loss, gen_img.detach().cpu(), world_img.detach().cpu()
+    return avg_disc_loss, avg_gen_loss, gen_img.detach().cpu(), world_img.detach().cpu(), face_img.detach().cpu()
 
 def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, discriminator, train_dataset,
                 criterion, opt_disc, opt_gen, checkpoint_dir, epochs_to_val, test_loader,
@@ -266,14 +266,15 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
     torch.autograd.set_detect_anomaly(True)
 
     dataset_size = len(train_dataset)
-    samples_per_epoch = dataset_size // num_epochs
+    samples_per_epoch = max(1, dataset_size // num_epochs)
+
     indices = torch.randperm(dataset_size)  # Mezcla aleatoria una vez
     train_discriminator = False
 
     for epoch in range(start_epoch, num_epochs):
         # Elegimos los índices para esta epoch
         start_idx = epoch * samples_per_epoch
-        end_idx = start_idx + samples_per_epoch
+        end_idx = min(start_idx + samples_per_epoch, dataset_size)
         subset_indices = indices[start_idx:end_idx]
 
         # Creamos dataloader con solo esa parte
@@ -284,7 +285,7 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
             pin_memory=True,
             num_workers=4
         )
-        loss_disc, loss_gen, gen_img, world_img = train_step(
+        loss_disc, loss_gen, gen_img, world_img, face_img = train_step(
             device, epoch, generator, discriminator, train_loader,
             criterion, scaler, opt_disc, opt_gen, train_discriminator, face_detector_model
         )
@@ -316,8 +317,10 @@ def train_model(device, start_epoch, num_epochs, scaler, log_dir, generator, dis
 
         grid_gen = make_grid((gen_img[:8].detach().cpu() + 1) / 2, nrow=4)
         grid_world = make_grid((world_img[:8].detach().cpu() + 1) / 2, nrow=4)
+        grid_faces = make_grid((face_img[:8].detach().cpu() + 1) / 2, nrow=4)
         writer.add_image("Images/Generated", grid_gen, epoch)
         writer.add_image("Images/World", grid_world, epoch)
+        writer.add_image("Images/Faces", grid_faces, epoch)
 
         log_model_histograms(writer, generator, "Generator", epoch)
         log_model_histograms(writer, discriminator, "Discriminator", epoch)
@@ -351,10 +354,18 @@ def start(device, warm_up_len, num_epochs, epochs_to_val, epochs_to_save, disc_l
 
     print("Tamaño del dataset:", len(dataset))
 
-    test_size = int(len(dataset) * test_split)
-    train_size = len(dataset) - test_size
+    total_len = len(dataset)
+    test_size = int(total_len * test_split)
+    train_size = total_len - test_size
 
-    torch.manual_seed(1984)
+    # Ajuste mínimo si el split deja vacío alguno de los conjuntos
+    if test_size == 0:
+        test_size = 1
+        train_size = total_len - 1
+    elif train_size == 0:
+        train_size = 1
+        test_size = total_len - 1
+
     train_dataset, test_dataset = random_split(dataset, [train_size, test_size])
 
     test_loader = DataLoader(test_dataset, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=4)
@@ -451,6 +462,8 @@ if __name__ == "__main__":
 
 
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    print(f"Empezando a entrenar. OPEN_IMG_NO_FACES_PATH: {OPEN_IMG_NO_FACES_PATH} - REAL_FACES_PATH: {REAL_FACES_PATH} - YOLO_FACE_PATH: {YOLO_FACE_PATH}")
 
     start(
         device=DEVICE,

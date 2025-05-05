@@ -1,8 +1,10 @@
+from PIL import Image, ImageFile
 from torchvision import transforms
-from PIL import Image
 import os
 import random
 import torch
+ImageFile.LOAD_TRUNCATED_IMAGES = True
+
 
 class WorldToFaceDataset(torch.utils.data.Dataset):
     def __init__(self, faces_dir, no_faces_dir, image_size):
@@ -12,19 +14,26 @@ class WorldToFaceDataset(torch.utils.data.Dataset):
             transforms.Normalize([0.5] * 3, [0.5] * 3)
         ])
 
-        self.inputs = []
-        self.real_faces = []
+        # 👇 Solo inputs sin caras
+        self.inputs = [
+            os.path.join(no_faces_dir, f)
+            for f in os.listdir(no_faces_dir)
+            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
 
-        for path in os.listdir(faces_dir):
-            full_path = os.path.join(faces_dir, path)
-            self.inputs.append(full_path)
-            self.real_faces.append(full_path)  # también serán nuestras imágenes reales
+        # 👇 Solo objetivos (caras reales)
+        self.real_faces = [
+            os.path.join(faces_dir, f)
+            for f in os.listdir(faces_dir)
+            if f.lower().endswith((".jpg", ".jpeg", ".png"))
+        ]
 
-        for path in os.listdir(no_faces_dir):
-            full_path = os.path.join(no_faces_dir, path)
-            self.inputs.append(full_path)
+        if not self.inputs:
+            raise ValueError("❌ No se encontraron imágenes en no_faces_dir")
 
-        random.shuffle(self.inputs)
+        if not self.real_faces:
+            raise ValueError("❌ No se encontraron imágenes en faces_dir")
+
         self.image_size = image_size
 
     def __len__(self):
@@ -32,12 +41,12 @@ class WorldToFaceDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         input_path = self.inputs[idx]
-        input_img = Image.open(input_path).convert("RGB")
-        input_tensor = self.transform(input_img)
-
-        # Imagen real con cara aleatoria (solo de la carpeta de caras)
         real_face_path = random.choice(self.real_faces)
+
+        input_img = Image.open(input_path).convert("RGB")
         real_img = Image.open(real_face_path).convert("RGB")
+
+        input_tensor = self.transform(input_img)
         real_tensor = self.transform(real_img)
 
         return input_tensor, real_tensor
